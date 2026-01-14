@@ -429,38 +429,46 @@ class BacktestEngine:
             self._debug_counts['no_ema_direction'] = self._debug_counts.get('no_ema_direction', 0) + 1
             return None  # No clear direction
 
-        # OB confluence
+        # ULTRA-STRICT: Require Liquidity Sweep (best SMC signal)
+        has_sweep = False
+        for sweep in recent_sweeps:
+            if (direction == 'long' and sweep.is_bullish) or \
+               (direction == 'short' and not sweep.is_bullish):
+                has_sweep = True
+                score += 20
+                break
+
+        if not has_sweep:
+            self._debug_counts['no_sweep'] = self._debug_counts.get('no_sweep', 0) + 1
+            return None  # MUST have sweep!
+
+        # OB confluence (bonus)
         near_ob = False
         for ob in active_obs:
             dist = abs(price - ob.mid) / price * 100
-            if dist < 1.0:  # Within 1%
+            if dist < 0.5:  # Tighter: within 0.5%
                 if (direction == 'long' and ob.is_bullish) or \
                    (direction == 'short' and not ob.is_bullish):
                     score += 15
                     near_ob = True
                     break
 
-        # FVG confluence
+        # FVG confluence (bonus)
+        in_fvg = False
         for fvg in active_fvgs:
             if fvg.bottom <= price <= fvg.top:
                 if (direction == 'long' and fvg.is_bullish) or \
                    (direction == 'short' and not fvg.is_bullish):
                     score += 10
+                    in_fvg = True
                     break
 
-        # Sweep confluence
-        for sweep in recent_sweeps:
-            if (direction == 'long' and sweep.is_bullish) or \
-               (direction == 'short' and not sweep.is_bullish):
-                score += 15
-                break
-
-        # RSI confluence
+        # RSI confluence (bonus)
         rsi = candle.get('rsi', 50)
-        if direction == 'long' and rsi < 40:
-            score += 5
-        elif direction == 'short' and rsi > 60:
-            score += 5
+        if direction == 'long' and rsi < 35:  # Stricter
+            score += 10
+        elif direction == 'short' and rsi > 65:  # Stricter
+            score += 10
 
         # Regime adjustment
         score = int(score * regime.leverage_multiplier)
@@ -479,16 +487,16 @@ class BacktestEngine:
             self._debug_counts['low_score'] = self._debug_counts.get('low_score', 0) + 1
             return None
 
-        # Calculate targets - 1:2 RR (Risk 1, Reward 2)
+        # Calculate targets - 1:1 RR
         atr = candle['atr']
         if direction == 'long':
             entry = price * (1 + self.bt_config.slippage_pct / 100)
-            sl = entry - atr * 1.5   # Wider SL to avoid noise
-            tp = entry + atr * 3.0   # 1:2 RR
+            sl = entry - atr * 1.5   # SL distance
+            tp = entry + atr * 1.5   # 1:1 RR
         else:
             entry = price * (1 - self.bt_config.slippage_pct / 100)
             sl = entry + atr * 1.5
-            tp = entry - atr * 3.0
+            tp = entry - atr * 1.5
 
         sl_pct = abs(entry - sl) / entry * 100
         tp_pct = abs(tp - entry) / entry * 100
