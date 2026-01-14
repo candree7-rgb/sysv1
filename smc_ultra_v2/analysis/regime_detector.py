@@ -275,12 +275,13 @@ class RegimeDetector:
         if total == 0:
             return 'neutral', 0
 
-        if bullish_score > bearish_score + 1:
+        # Simple majority determines direction
+        if bullish_score > bearish_score:
             return 'up', bullish_score / total
-        elif bearish_score > bullish_score + 1:
+        elif bearish_score > bullish_score:
             return 'down', bearish_score / total
         else:
-            return 'neutral', abs(bullish_score - bearish_score) / total
+            return 'neutral', 0.5
 
     def _classify_regime(
         self,
