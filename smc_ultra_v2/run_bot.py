@@ -80,21 +80,25 @@ def download_minimal_data():
 
 def run_paper_trading():
     """Run paper trading bot"""
-    print("\nStarting Paper Trading Bot...")
-    print(f"Using {'TESTNET (testnet.bybit.com)' if USE_TESTNET else 'DEMO (bybit.com)'}")
+    print("\nStarting Paper Trading Bot...", flush=True)
+    print(f"Using {'TESTNET (testnet.bybit.com)' if USE_TESTNET else 'DEMO (bybit.com)'}", flush=True)
 
     from config import config
     config.api.testnet = USE_TESTNET  # False = use bybit.com (demo trading keys work)
 
     # Check API keys
     if not config.api.api_key:
-        print("\nERROR: BYBIT_API_KEY not set!")
-        print("Set environment variables in Railway dashboard")
+        print("\nERROR: BYBIT_API_KEY not set!", flush=True)
+        print("Set environment variables in Railway dashboard", flush=True)
         sys.exit(1)
+
+    print("[DEBUG] API key found, importing main...", flush=True)
 
     # Import and run
     from main import run_live_bot
     import argparse
+
+    print("[DEBUG] Starting asyncio loop...", flush=True)
 
     args = argparse.Namespace(
         coins=NUM_COINS,
@@ -137,12 +141,17 @@ def run_backtest():
 
 
 def main():
+    print("\n[DEBUG] Starting main()", flush=True)
+
     # Always download fresh data first
     download_minimal_data()
+
+    print(f"\n[DEBUG] Mode is: {MODE}", flush=True)
 
     if MODE == 'backtest':
         run_backtest()
     elif MODE in ['paper', 'live']:
+        print("[DEBUG] Calling run_paper_trading()", flush=True)
         run_paper_trading()
     else:
         print(f"Unknown mode: {MODE}")
