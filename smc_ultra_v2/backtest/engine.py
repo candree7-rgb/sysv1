@@ -430,8 +430,13 @@ class BacktestEngine:
             return None  # No clear direction
 
         # ============================================
-        # SMC SCORING - Sweep + RSI filter
+        # ULTRA-SELECTIVE: Only the BEST setups
         # ============================================
+
+        # 0. REQUIRED: Only STRONG trends (no weak/ranging)
+        if regime.regime.value not in ('strong_trend_up', 'strong_trend_down'):
+            self._debug_counts['not_strong_trend'] = self._debug_counts.get('not_strong_trend', 0) + 1
+            return None
 
         # 1. REQUIRED: Liquidity Sweep
         has_sweep = False
@@ -446,18 +451,18 @@ class BacktestEngine:
             self._debug_counts['no_sweep'] = self._debug_counts.get('no_sweep', 0) + 1
             return None
 
-        # 2. REQUIRED: RSI confirms reversal
+        # 2. REQUIRED: RSI EXTREME (very strict!)
         rsi = candle.get('rsi', 50)
         rsi_ok = False
-        if direction == 'long' and rsi < 45:  # Oversold-ish
-            score += 15
+        if direction == 'long' and rsi < 35:  # Must be oversold
+            score += 20
             rsi_ok = True
-        elif direction == 'short' and rsi > 55:  # Overbought-ish
-            score += 15
+        elif direction == 'short' and rsi > 65:  # Must be overbought
+            score += 20
             rsi_ok = True
 
         if not rsi_ok:
-            self._debug_counts['rsi_wrong_side'] = self._debug_counts.get('rsi_wrong_side', 0) + 1
+            self._debug_counts['rsi_not_extreme'] = self._debug_counts.get('rsi_not_extreme', 0) + 1
             return None
 
         # 3. BONUS: Near Order Block
@@ -482,10 +487,8 @@ class BacktestEngine:
                     break
 
         # 5. BONUS: Multiple confluences
-        if near_ob:
-            score += 5
-        if in_fvg:
-            score += 5
+        if near_ob and in_fvg:
+            score += 10
 
         # Regime adjustment
         score = int(score * regime.leverage_multiplier)
@@ -504,16 +507,16 @@ class BacktestEngine:
             self._debug_counts['low_score'] = self._debug_counts.get('low_score', 0) + 1
             return None
 
-        # Calculate targets - slightly positive RR to offset slippage
+        # Calculate targets - tight SL, reasonable TP
         atr = candle['atr']
         if direction == 'long':
             entry = price * (1 + self.bt_config.slippage_pct / 100)
-            sl = entry - atr * 1.2   # Tighter SL
-            tp = entry + atr * 1.5   # Wider TP (1:1.25 RR)
+            sl = entry - atr * 1.0   # Tight SL
+            tp = entry + atr * 1.2   # 1:1.2 RR
         else:
             entry = price * (1 - self.bt_config.slippage_pct / 100)
-            sl = entry + atr * 1.2
-            tp = entry - atr * 1.5
+            sl = entry + atr * 1.0   # Tight SL
+            tp = entry - atr * 1.2   # 1:1.2 RR
 
         sl_pct = abs(entry - sl) / entry * 100
         tp_pct = abs(tp - entry) / entry * 100
