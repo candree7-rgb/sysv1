@@ -135,9 +135,11 @@ def run_backtest():
         start_date=start,
         end_date=end,
         initial_capital=10000,
-        min_confidence=85,
-        max_trades=3
+        min_confidence=60,  # Lowered from 85 to find more trades
+        max_trades=5  # Allow more concurrent trades
     )
+
+    print(f"[DEBUG] Config: min_confidence=60, max_trades=5", flush=True)
 
     print("[DEBUG] Creating BacktestEngine...", flush=True)
     engine = BacktestEngine(bt_config)

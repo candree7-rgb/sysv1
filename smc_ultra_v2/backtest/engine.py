@@ -148,6 +148,7 @@ class BacktestEngine:
         self.active_trades: Dict[str, Trade] = {}
         self.closed_trades: List[BacktestTrade] = []
         self.equity_history: List[Dict] = []
+        self._signal_log_count = 0  # For debug logging
 
     def run(self) -> BacktestResult:
         """
@@ -334,6 +335,7 @@ class BacktestEngine:
         """Check for new trading signals"""
         best_signal = None
         best_score = 0
+        signals_found = 0
 
         for symbol, df in self.data.items():
             if symbol.endswith(('_obs', '_fvgs', '_sweeps')):
@@ -355,12 +357,20 @@ class BacktestEngine:
             # Analyze
             signal = self._analyze_bar(symbol, df, idx, ts)
 
-            if signal and signal.should_trade and signal.confidence > best_score:
-                best_signal = signal
-                best_score = signal.confidence
+            if signal and signal.should_trade:
+                signals_found += 1
+                if signal.confidence > best_score:
+                    best_signal = signal
+                    best_score = signal.confidence
 
-        if best_signal and best_signal.confidence >= self.bt_config.min_confidence:
-            self._open_trade(best_signal, ts)
+        if best_signal:
+            if best_signal.confidence >= self.bt_config.min_confidence:
+                print(f"  [TRADE] {best_signal.symbol} {best_signal.direction} @ {best_signal.entry_price:.2f} (conf: {best_signal.confidence}%)", flush=True)
+                self._open_trade(best_signal, ts)
+            elif signals_found > 0 and self._signal_log_count < 10:
+                # Log some rejected signals for debugging
+                print(f"  [SKIP] {best_signal.symbol} conf={best_signal.confidence}% < min={self.bt_config.min_confidence}%", flush=True)
+                self._signal_log_count += 1
 
     def _analyze_bar(
         self,
