@@ -1,0 +1,30 @@
+# SMC Ultra V2 - Requirements
+# ===========================
+
+# Core
+python-dotenv>=1.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=14.0.0  # For parquet files
+
+# Bybit API
+pybit>=5.6.0
+
+# Async
+aiohttp>=3.8.0
+asyncio-throttle>=1.0.0
+
+# Machine Learning (optional but recommended)
+xgboost>=2.0.0
+scikit-learn>=1.3.0
+
+# Visualization (optional)
+# matplotlib>=3.7.0
+# plotly>=5.15.0
+
+# Database (optional)
+# supabase>=2.0.0
+
+# Testing (dev only)
+# pytest>=7.0.0
+# pytest-asyncio>=0.21.0
