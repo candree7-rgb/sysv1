@@ -12,5 +12,5 @@ COPY . .
 # Create data directories
 RUN mkdir -p data/historical models backtest_results
 
-# Default command (can be overridden)
-CMD ["python", "main.py", "live", "--paper"]
+# Start script that downloads data first, then runs bot
+CMD ["python", "run_bot.py"]
