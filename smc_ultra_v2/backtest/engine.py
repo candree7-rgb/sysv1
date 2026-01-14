@@ -398,6 +398,9 @@ class BacktestEngine:
 
         # Regime check
         regime = self.regime_detector.detect(hist)
+        # Track regime distribution for debugging
+        regime_key = f'regime_{regime.regime.value}'
+        self._debug_counts[regime_key] = self._debug_counts.get(regime_key, 0) + 1
         if not regime.should_trade:
             self._debug_counts['regime_no_trade'] = self._debug_counts.get('regime_no_trade', 0) + 1
             return None
