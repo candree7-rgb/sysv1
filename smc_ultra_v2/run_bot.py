@@ -24,6 +24,8 @@ threading.excepthook = _silent_thread_exception
 MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest
 NUM_COINS = int(os.getenv('BOT_COINS', '30'))  # Number of coins to trade
 USE_TESTNET = os.getenv('USE_TESTNET', 'false').lower() == 'true'  # true = testnet.bybit.com, false = bybit.com demo
+MIN_CONFIDENCE = int(os.getenv('MIN_CONFIDENCE', '60'))  # Minimum confidence for trades
+MAX_TRADES = int(os.getenv('MAX_TRADES', '5'))  # Max concurrent trades
 
 
 def download_minimal_data():
@@ -135,11 +137,11 @@ def run_backtest():
         start_date=start,
         end_date=end,
         initial_capital=10000,
-        min_confidence=60,  # Lowered from 85 to find more trades
-        max_trades=5  # Allow more concurrent trades
+        min_confidence=MIN_CONFIDENCE,  # From ENV
+        max_trades=MAX_TRADES  # From ENV
     )
 
-    print(f"[DEBUG] Config: min_confidence=60, max_trades=5", flush=True)
+    print(f"[DEBUG] Config: min_confidence={MIN_CONFIDENCE}, max_trades={MAX_TRADES}", flush=True)
 
     print("[DEBUG] Creating BacktestEngine...", flush=True)
     engine = BacktestEngine(bt_config)
