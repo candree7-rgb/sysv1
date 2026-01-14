@@ -123,8 +123,6 @@ async def run_live_bot(args):
 
     # Initialize
     executor = BybitExecutor()
-    ws = BybitWebSocket()
-    aggregator = DataAggregator()
     signal_gen = SignalGenerator()
     position_mgr = PositionManager()
 
@@ -133,23 +131,54 @@ async def run_live_bot(args):
 
     print(f"\nMonitoring {len(coins)} coins...")
 
-    # Setup callbacks
-    ws.on_kline(aggregator.add_kline)
-    ws.on_ticker(aggregator.add_ticker)
+    reconnect_count = 0
+    max_reconnects = 10
 
-    def on_position_update(data):
-        print(f"Position update: {data}")
+    while reconnect_count < max_reconnects:
+        try:
+            # Create fresh WebSocket and aggregator
+            ws = BybitWebSocket()
+            aggregator = DataAggregator()
 
-    ws.on_position(on_position_update)
+            # Setup callbacks
+            ws.on_kline(aggregator.add_kline)
+            ws.on_ticker(aggregator.add_ticker)
 
-    # Start WebSocket
-    await ws.start()
-    ws.subscribe_multiple(coins[:20])  # Subscribe to top 20
+            def on_position_update(data):
+                print(f"Position update: {data}")
 
-    print("WebSocket connected. Starting trading loop...")
+            ws.on_position(on_position_update)
 
-    try:
-        while True:
+            # Start WebSocket
+            await ws.start()
+            ws.subscribe_multiple(coins[:20])  # Subscribe to top 20
+
+            print("WebSocket connected. Starting trading loop...")
+            reconnect_count = 0  # Reset on successful connection
+
+            await _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coins, args)
+
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+            break
+        except Exception as e:
+            reconnect_count += 1
+            print(f"\nWebSocket error: {e}")
+            print(f"Reconnecting ({reconnect_count}/{max_reconnects}) in 10 seconds...")
+            try:
+                ws.stop()
+            except:
+                pass
+            await asyncio.sleep(10)
+
+    if reconnect_count >= max_reconnects:
+        print("Max reconnects reached. Exiting.")
+
+
+async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coins, args):
+    """Inner trading loop"""
+    while True:
+        try:
             # Check balance
             balance = executor.get_balance()
             if 'error' in balance:
@@ -210,17 +239,11 @@ async def run_live_bot(args):
             # Wait
             await asyncio.sleep(args.interval_seconds)
 
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    finally:
-        ws.stop()
-
-    # Print stats
-    stats = position_mgr.get_stats()
-    print(f"\nSession Stats:")
-    print(f"  Trades: {stats.get('trades', 0)}")
-    print(f"  Win Rate: {stats.get('win_rate', 0):.1f}%")
-    print(f"  Total PnL: {stats.get('total_pnl', 0):.2f}%")
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            print(f"Loop error: {e}")
+            await asyncio.sleep(30)
 
 
 def cmd_train(args):
