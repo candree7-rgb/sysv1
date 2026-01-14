@@ -465,7 +465,18 @@ class BacktestEngine:
         # Regime adjustment
         score = int(score * regime.leverage_multiplier)
 
+        # Track score distribution
+        if score >= 80:
+            self._debug_counts['score_80+'] = self._debug_counts.get('score_80+', 0) + 1
+        elif score >= 70:
+            self._debug_counts['score_70-79'] = self._debug_counts.get('score_70-79', 0) + 1
+        elif score >= 60:
+            self._debug_counts['score_60-69'] = self._debug_counts.get('score_60-69', 0) + 1
+        else:
+            self._debug_counts['score_below_60'] = self._debug_counts.get('score_below_60', 0) + 1
+
         if score < self.bt_config.min_confidence:
+            self._debug_counts['low_score'] = self._debug_counts.get('low_score', 0) + 1
             return None
 
         # Calculate targets
