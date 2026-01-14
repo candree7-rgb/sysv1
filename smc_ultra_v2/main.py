@@ -189,19 +189,30 @@ async def run_live_bot(args):
 
 async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coins, args):
     """Inner trading loop"""
+    print("[DEBUG] Trading loop started", flush=True)
+    loop_count = 0
+
     while True:
+        loop_count += 1
+        print(f"[DEBUG] Loop iteration {loop_count}", flush=True)
+
         try:
             # Check balance
+            print("[DEBUG] Checking balance...", flush=True)
             balance = executor.get_balance()
+            print(f"[DEBUG] Balance result: {balance}", flush=True)
+
             if 'error' in balance:
-                print(f"Balance error: {balance['error']}")
+                print(f"Balance error: {balance['error']}", flush=True)
                 await asyncio.sleep(60)
                 continue
 
-            print(f"\n[{datetime.utcnow()}] Balance: ${balance['equity']:,.2f}")
+            print(f"\n[{datetime.utcnow()}] Balance: ${balance['equity']:,.2f}", flush=True)
 
             # Scan for signals
+            print("[DEBUG] Scanning for signals...", flush=True)
             signals = signal_gen.scan_all(coins[:30])
+            print(f"[DEBUG] Found {len(signals) if signals else 0} signals", flush=True)
 
             if signals:
                 print(f"Found {len(signals)} signals")
