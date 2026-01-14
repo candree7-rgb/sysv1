@@ -54,14 +54,15 @@ class RiskConfig:
     """Risk Management Configuration"""
     risk_level: RiskLevel = RiskLevel.MODERATE
 
-    # Per-trade risk
-    max_risk_per_trade_pct: float = 2.0
+    # Per-trade risk (from env or default)
+    # $100 Account mit 2% = $2 Risk pro Trade
+    max_risk_per_trade_pct: float = float(os.getenv("RISK_PER_TRADE", "2.0"))
     max_daily_risk_pct: float = 6.0
     max_weekly_risk_pct: float = 15.0
 
-    # Leverage
-    max_leverage: int = 50
-    min_leverage: int = 5
+    # Leverage (konservativer für kleine Accounts)
+    max_leverage: int = int(os.getenv("MAX_LEVERAGE", "30"))
+    min_leverage: int = 3
 
     # Drawdown protection
     max_drawdown_pct: float = 20.0
