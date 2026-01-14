@@ -111,18 +111,27 @@ def run_paper_trading():
 
 def run_backtest():
     """Run backtest"""
-    print("\nRunning Backtest...")
+    print("\n[DEBUG] Running Backtest...", flush=True)
 
     from datetime import timedelta
     from backtest import BacktestEngine, BacktestConfig
     from config.coins import get_top_n_coins
 
+    print("[DEBUG] Imports done", flush=True)
+
     coins = get_top_n_coins(NUM_COINS)
+    # Filter out skipped coins
+    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT'}
+    coins = [c for c in coins if c not in SKIP_COINS]
+
     end = datetime.utcnow()
     start = end - timedelta(days=7)
 
+    print(f"[DEBUG] Backtest period: {start} to {end}", flush=True)
+    print(f"[DEBUG] Coins: {len(coins)}", flush=True)
+
     bt_config = BacktestConfig(
-        symbols=coins,
+        symbols=coins[:20],  # Start with top 20 for speed
         start_date=start,
         end_date=end,
         initial_capital=10000,
@@ -130,14 +139,24 @@ def run_backtest():
         max_trades=3
     )
 
+    print("[DEBUG] Creating BacktestEngine...", flush=True)
     engine = BacktestEngine(bt_config)
+
+    print("[DEBUG] Running backtest (this may take a few minutes)...", flush=True)
     results = engine.run()
+
+    print("[DEBUG] Saving results...", flush=True)
     engine.save_results()
 
-    print(f"\nBacktest Complete!")
-    print(f"Win Rate: {results.win_rate}%")
-    print(f"Profit Factor: {results.profit_factor}")
-    print(f"Total Return: {results.total_return_pct}%")
+    print(f"\n{'='*50}", flush=True)
+    print(f"BACKTEST COMPLETE!", flush=True)
+    print(f"{'='*50}", flush=True)
+    print(f"Total Trades: {results.total_trades}", flush=True)
+    print(f"Win Rate: {results.win_rate:.1f}%", flush=True)
+    print(f"Profit Factor: {results.profit_factor:.2f}", flush=True)
+    print(f"Total Return: {results.total_return_pct:.2f}%", flush=True)
+    print(f"Max Drawdown: {results.max_drawdown_pct:.2f}%", flush=True)
+    print(f"{'='*50}", flush=True)
 
 
 def main():
@@ -149,6 +168,7 @@ def main():
     print(f"\n[DEBUG] Mode is: {MODE}", flush=True)
 
     if MODE == 'backtest':
+        print("[DEBUG] Calling run_backtest()...", flush=True)
         run_backtest()
     elif MODE in ['paper', 'live']:
         print("[DEBUG] Calling run_paper_trading()", flush=True)
