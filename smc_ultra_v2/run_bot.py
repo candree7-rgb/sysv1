@@ -10,8 +10,9 @@ import sys
 import asyncio
 from datetime import datetime
 
-# Mode from env
+# Config from env
 MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest
+NUM_COINS = int(os.getenv('BOT_COINS', '30'))  # Number of coins to trade
 
 
 def download_minimal_data():
@@ -20,6 +21,7 @@ def download_minimal_data():
     print("SMC ULTRA V2 - RAILWAY STARTUP")
     print("=" * 60)
     print(f"Mode: {MODE}")
+    print(f"Coins: {NUM_COINS}")
     print(f"Time: {datetime.utcnow()}")
     print("=" * 60)
 
@@ -29,7 +31,7 @@ def download_minimal_data():
     dl = BybitDataDownloader()
 
     # Get top coins
-    coins = get_top_n_coins(30)  # Top 30 for speed
+    coins = get_top_n_coins(NUM_COINS)
     print(f"\nDownloading data for {len(coins)} coins...")
 
     # Download 7 days of 5min data (fast, enough for live)
@@ -67,7 +69,7 @@ def run_paper_trading():
     import argparse
 
     args = argparse.Namespace(
-        coins=30,
+        coins=NUM_COINS,
         interval_seconds=60,
         paper=True
     )
@@ -83,7 +85,7 @@ def run_backtest():
     from backtest import BacktestEngine, BacktestConfig
     from config.coins import get_top_n_coins
 
-    coins = get_top_n_coins(30)
+    coins = get_top_n_coins(NUM_COINS)
     end = datetime.utcnow()
     start = end - timedelta(days=7)
 
