@@ -162,9 +162,16 @@ class RegimeConfig:
             'tp_multiplier': 1.5,
             'leverage_mult': 1.0
         },
-        'weak_trend': {
+        'weak_trend_up': {
             'trade': True,
-            'direction': 'both',
+            'direction': 'long_only',
+            'min_confidence': 85,
+            'tp_multiplier': 1.0,
+            'leverage_mult': 0.8
+        },
+        'weak_trend_down': {
+            'trade': True,
+            'direction': 'short_only',
             'min_confidence': 85,
             'tp_multiplier': 1.0,
             'leverage_mult': 0.8
