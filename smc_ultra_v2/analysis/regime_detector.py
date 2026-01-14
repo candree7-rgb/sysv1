@@ -272,6 +272,14 @@ class RegimeDetector:
 
         # Determine direction and strength
         total = bullish_score + bearish_score
+
+        # DEBUG: Log scores (first 5 only)
+        if not hasattr(self, '_trend_debug_logged'):
+            self._trend_debug_logged = 0
+        if self._trend_debug_logged < 5:
+            print(f"  [TREND DEBUG] bullish={bullish_score}, bearish={bearish_score}, total={total}")
+            self._trend_debug_logged += 1
+
         if total == 0:
             return 'neutral', 0
 
@@ -295,6 +303,13 @@ class RegimeDetector:
         """
         Classify market regime based on indicators.
         """
+        # DEBUG: Track why we're not getting trends
+        if not hasattr(self, '_debug_logged'):
+            self._debug_logged = 0
+        if self._debug_logged < 5:
+            print(f"  [REGIME DEBUG] ADX={adx:.1f}, trend_dir={trend_direction}, chop={choppiness:.1f}, vol={volume_ratio:.2f}")
+            self._debug_logged += 1
+
         # Low volume = No trade
         if volume_ratio < self.config.low_volume_threshold:
             return MarketRegime.LOW_VOLUME
