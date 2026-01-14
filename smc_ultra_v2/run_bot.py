@@ -13,6 +13,7 @@ from datetime import datetime
 # Config from env
 MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest
 NUM_COINS = int(os.getenv('BOT_COINS', '30'))  # Number of coins to trade
+USE_TESTNET = os.getenv('USE_TESTNET', 'false').lower() == 'true'  # true = testnet.bybit.com, false = bybit.com demo
 
 
 def download_minimal_data():
@@ -22,6 +23,7 @@ def download_minimal_data():
     print("=" * 60)
     print(f"Mode: {MODE}")
     print(f"Coins: {NUM_COINS}")
+    print(f"API: {'testnet.bybit.com' if USE_TESTNET else 'bybit.com (demo)'}")
     print(f"Time: {datetime.utcnow()}")
     print("=" * 60)
 
@@ -54,9 +56,10 @@ def download_minimal_data():
 def run_paper_trading():
     """Run paper trading bot"""
     print("\nStarting Paper Trading Bot...")
+    print(f"Using {'TESTNET (testnet.bybit.com)' if USE_TESTNET else 'DEMO (bybit.com)'}")
 
     from config import config
-    config.api.testnet = True
+    config.api.testnet = USE_TESTNET  # False = use bybit.com (demo trading keys work)
 
     # Check API keys
     if not config.api.api_key:
