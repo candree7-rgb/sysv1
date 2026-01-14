@@ -429,7 +429,12 @@ class BacktestEngine:
             self._debug_counts['no_ema_direction'] = self._debug_counts.get('no_ema_direction', 0) + 1
             return None  # No clear direction
 
-        # ULTRA-STRICT: Require Liquidity Sweep (best SMC signal)
+        # ============================================
+        # ULTRA-STRICT SMC FILTERING
+        # Require: Sweep + (OB or FVG) + RSI extreme
+        # ============================================
+
+        # 1. REQUIRED: Liquidity Sweep
         has_sweep = False
         for sweep in recent_sweeps:
             if (direction == 'long' and sweep.is_bullish) or \
@@ -440,34 +445,48 @@ class BacktestEngine:
 
         if not has_sweep:
             self._debug_counts['no_sweep'] = self._debug_counts.get('no_sweep', 0) + 1
-            return None  # MUST have sweep!
+            return None
 
-        # OB confluence (bonus)
+        # 2. REQUIRED: Near Order Block OR in FVG
         near_ob = False
         for ob in active_obs:
             dist = abs(price - ob.mid) / price * 100
-            if dist < 0.5:  # Tighter: within 0.5%
+            if dist < 0.3:  # Very tight: within 0.3%
                 if (direction == 'long' and ob.is_bullish) or \
                    (direction == 'short' and not ob.is_bullish):
-                    score += 15
+                    score += 20
                     near_ob = True
                     break
 
-        # FVG confluence (bonus)
         in_fvg = False
         for fvg in active_fvgs:
             if fvg.bottom <= price <= fvg.top:
                 if (direction == 'long' and fvg.is_bullish) or \
                    (direction == 'short' and not fvg.is_bullish):
-                    score += 10
+                    score += 15
                     in_fvg = True
                     break
 
-        # RSI confluence (bonus)
+        if not near_ob and not in_fvg:
+            self._debug_counts['no_ob_or_fvg'] = self._debug_counts.get('no_ob_or_fvg', 0) + 1
+            return None
+
+        # 3. REQUIRED: RSI extreme (oversold/overbought)
         rsi = candle.get('rsi', 50)
-        if direction == 'long' and rsi < 35:  # Stricter
-            score += 10
-        elif direction == 'short' and rsi > 65:  # Stricter
+        rsi_extreme = False
+        if direction == 'long' and rsi < 30:
+            score += 15
+            rsi_extreme = True
+        elif direction == 'short' and rsi > 70:
+            score += 15
+            rsi_extreme = True
+
+        if not rsi_extreme:
+            self._debug_counts['no_rsi_extreme'] = self._debug_counts.get('no_rsi_extreme', 0) + 1
+            return None
+
+        # Bonus: Both OB and FVG
+        if near_ob and in_fvg:
             score += 10
 
         # Regime adjustment
