@@ -10,7 +10,6 @@ import sys
 import asyncio
 import threading
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 # Suppress pybit WebSocket thread errors (cosmetic, doesn't affect operation)
 def _silent_thread_exception(args):
@@ -48,33 +47,34 @@ def download_minimal_data():
     print(f"\nDownloading data for {len(coins)} coins...")
 
     # Download 7 days of 5min data (fast, enough for live)
-    # Use timeout to prevent hanging on slow coins
-    DOWNLOAD_TIMEOUT = 30  # seconds per coin
+    # Known problematic coins that often timeout/have no data
+    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT'}
 
-    def download_single(symbol):
-        df = dl.download_coin(symbol, interval="5", days=7)
-        if len(df) > 0:
-            filepath = dl.get_cache_path(symbol, "5", 7)
-            df.to_parquet(filepath)
-            return len(df)
-        return 0
-
+    successful = 0
     for i, symbol in enumerate(coins):
+        # Skip known problematic coins
+        if symbol in SKIP_COINS:
+            print(f"  [{i+1}/{len(coins)}] {symbol}... SKIP (known issue)")
+            continue
+
         print(f"  [{i+1}/{len(coins)}] {symbol}...", end="", flush=True)
+        sys.stdout.flush()
+
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(download_single, symbol)
-                bars = future.result(timeout=DOWNLOAD_TIMEOUT)
-                if bars > 0:
-                    print(f" OK ({bars} bars)")
-                else:
-                    print(" SKIP")
-        except FuturesTimeoutError:
-            print(" TIMEOUT (skipped)")
+            df = dl.download_coin(symbol, interval="5", days=7)
+            if len(df) > 0:
+                filepath = dl.get_cache_path(symbol, "5", 7)
+                df.to_parquet(filepath)
+                print(f" OK ({len(df)} bars)")
+                successful += 1
+            else:
+                print(" SKIP (no data)")
         except Exception as e:
             print(f" ERROR: {e}")
 
-    print("\nData download complete!")
+        sys.stdout.flush()
+
+    print(f"\nData download complete! ({successful} coins loaded)")
 
 
 def run_paper_trading():
