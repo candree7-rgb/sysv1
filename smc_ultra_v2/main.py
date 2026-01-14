@@ -118,24 +118,34 @@ def cmd_live(args):
 
 async def run_live_bot(args):
     """Main live trading loop"""
+    print("[DEBUG] run_live_bot started", flush=True)
+
     from live import BybitExecutor, BybitWebSocket, DataAggregator
     from strategy import SignalGenerator, PositionManager
 
+    print("[DEBUG] Imports done, creating executor...", flush=True)
+
     # Initialize
     executor = BybitExecutor()
+    print("[DEBUG] Executor created", flush=True)
+
     signal_gen = SignalGenerator()
+    print("[DEBUG] SignalGenerator created", flush=True)
+
     position_mgr = PositionManager()
+    print("[DEBUG] PositionManager created", flush=True)
 
     # Get tradeable coins
     coins = get_top_n_coins(args.coins)
 
-    print(f"\nMonitoring {len(coins)} coins...")
+    print(f"\nMonitoring {len(coins)} coins...", flush=True)
 
     reconnect_count = 0
     max_reconnects = 10
 
     while reconnect_count < max_reconnects:
         try:
+            print("[DEBUG] Creating WebSocket...", flush=True)
             # Create fresh WebSocket and aggregator
             ws = BybitWebSocket()
             aggregator = DataAggregator()
@@ -145,15 +155,17 @@ async def run_live_bot(args):
             ws.on_ticker(aggregator.add_ticker)
 
             def on_position_update(data):
-                print(f"Position update: {data}")
+                print(f"Position update: {data}", flush=True)
 
             ws.on_position(on_position_update)
 
             # Start WebSocket
+            print("[DEBUG] Starting WebSocket...", flush=True)
             await ws.start()
+            print("[DEBUG] WebSocket started, subscribing...", flush=True)
             ws.subscribe_multiple(coins[:20])  # Subscribe to top 20
 
-            print("WebSocket connected. Starting trading loop...")
+            print("WebSocket connected. Starting trading loop...", flush=True)
             reconnect_count = 0  # Reset on successful connection
 
             await _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coins, args)
