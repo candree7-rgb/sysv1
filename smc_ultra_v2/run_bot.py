@@ -26,6 +26,7 @@ NUM_COINS = int(os.getenv('BOT_COINS', '30'))  # Number of coins to trade
 USE_TESTNET = os.getenv('USE_TESTNET', 'false').lower() == 'true'  # true = testnet.bybit.com, false = bybit.com demo
 MIN_CONFIDENCE = int(os.getenv('MIN_CONFIDENCE', '60'))  # Minimum confidence for trades
 MAX_TRADES = int(os.getenv('MAX_TRADES', '5'))  # Max concurrent trades
+BACKTEST_DAYS = int(os.getenv('BACKTEST_DAYS', '7'))  # Days to backtest
 
 
 def download_minimal_data():
@@ -127,13 +128,13 @@ def run_backtest():
     coins = [c for c in coins if c not in SKIP_COINS]
 
     end = datetime.utcnow()
-    start = end - timedelta(days=7)
+    start = end - timedelta(days=BACKTEST_DAYS)
 
     print(f"[DEBUG] Backtest period: {start} to {end}", flush=True)
     print(f"[DEBUG] Coins: {len(coins)}", flush=True)
 
     bt_config = BacktestConfig(
-        symbols=coins[:20],  # Start with top 20 for speed
+        symbols=coins[:NUM_COINS],  # Use NUM_COINS from env
         start_date=start,
         end_date=end,
         initial_capital=10000,

@@ -504,15 +504,15 @@ class BacktestEngine:
             self._debug_counts['low_score'] = self._debug_counts.get('low_score', 0) + 1
             return None
 
-        # Calculate targets - 1:1 RR
+        # Calculate targets - slightly positive RR to offset slippage
         atr = candle['atr']
         if direction == 'long':
             entry = price * (1 + self.bt_config.slippage_pct / 100)
-            sl = entry - atr * 1.5   # SL distance
-            tp = entry + atr * 1.5   # 1:1 RR
+            sl = entry - atr * 1.2   # Tighter SL
+            tp = entry + atr * 1.5   # Wider TP (1:1.25 RR)
         else:
             entry = price * (1 - self.bt_config.slippage_pct / 100)
-            sl = entry + atr * 1.5
+            sl = entry + atr * 1.2
             tp = entry - atr * 1.5
 
         sl_pct = abs(entry - sl) / entry * 100
