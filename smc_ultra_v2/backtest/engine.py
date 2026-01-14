@@ -149,6 +149,7 @@ class BacktestEngine:
         self.closed_trades: List[BacktestTrade] = []
         self.equity_history: List[Dict] = []
         self._signal_log_count = 0  # For debug logging
+        self._debug_counts = {}  # For tracking filter reasons
 
     def run(self) -> BacktestResult:
         """
@@ -283,7 +284,12 @@ class BacktestEngine:
                 'drawdown': self._calc_drawdown()
             })
 
-        print(f"  Completed: {len(self.closed_trades)} trades")
+        print(f"  Completed: {len(self.closed_trades)} trades", flush=True)
+
+        # Debug: show filter reasons
+        print(f"\n  Signal Filter Stats:", flush=True)
+        for reason, count in sorted(self._debug_counts.items(), key=lambda x: -x[1]):
+            print(f"    {reason}: {count:,}", flush=True)
 
     def _update_trades(self, ts: datetime):
         """Update all active trades"""
@@ -387,11 +393,13 @@ class BacktestEngine:
         hist = df.iloc[:idx+1].tail(100)
 
         if len(hist) < 50:
+            self._debug_counts['hist_too_short'] = self._debug_counts.get('hist_too_short', 0) + 1
             return None
 
         # Regime check
         regime = self.regime_detector.detect(hist)
         if not regime.should_trade:
+            self._debug_counts['regime_no_trade'] = self._debug_counts.get('regime_no_trade', 0) + 1
             return None
 
         # Get SMC structures
@@ -415,6 +423,7 @@ class BacktestEngine:
             direction = 'short'
             score += 15
         else:
+            self._debug_counts['no_ema_direction'] = self._debug_counts.get('no_ema_direction', 0) + 1
             return None  # No clear direction
 
         # OB confluence
