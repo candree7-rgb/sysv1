@@ -241,7 +241,11 @@ class BacktestEngine:
 
     def _detect_smc(self):
         """Detect SMC structures for all data"""
-        for symbol, df in self.data.items():
+        # Create list copy to avoid modifying dict during iteration
+        symbols_data = [(s, df) for s, df in self.data.items() if not s.endswith(('_obs', '_fvgs', '_sweeps'))]
+
+        for symbol, df in symbols_data:
+            print(f"  Detecting SMC for {symbol}...", flush=True)
             atr = df['atr']
             self.data[symbol + '_obs'] = self.ob_detector.detect(df, atr)
             self.data[symbol + '_fvgs'] = self.fvg_detector.detect(df)
