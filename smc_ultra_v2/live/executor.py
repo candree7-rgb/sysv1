@@ -167,10 +167,10 @@ class BybitExecutor:
         qty: float = None
     ) -> OrderResult:
         """
-        Open a position based on signal.
+        Open a position based on signal using LIMIT order for precise entry.
 
         Args:
-            signal: Trading signal
+            signal: Trading signal with entry_price
             qty: Quantity (calculated from signal if not provided)
 
         Returns:
@@ -190,16 +190,23 @@ class BybitExecutor:
             if qty <= 0:
                 return OrderResult(success=False, error="Invalid quantity")
 
-            # Place market order
+            # Place LIMIT order at exact entry price for better RR
             response = self.client.place_order(
                 category="linear",
                 symbol=symbol,
                 side=side,
-                orderType=OrderType.MARKET.value,
+                orderType="Limit",
+                price=str(signal.entry_price),
                 qty=str(qty),
-                timeInForce="GTC",
+                timeInForce="PostOnly",  # Maker only = lower fees
                 reduceOnly=False,
-                closeOnTrigger=False
+                closeOnTrigger=False,
+                # Attach TP/SL directly to order
+                takeProfit=str(signal.take_profit),
+                stopLoss=str(signal.stop_loss),
+                tpslMode="Full",
+                tpOrderType="Limit",  # TP as Limit order
+                slOrderType="Market"  # SL as Market for guaranteed exit
             )
 
             if response['retCode'] != 0:
@@ -210,19 +217,44 @@ class BybitExecutor:
 
             order_id = response['result']['orderId']
 
-            # Set TP/SL
-            tp_sl_result = self._set_tp_sl(symbol, signal.direction, signal.take_profit, signal.stop_loss)
-
             return OrderResult(
                 success=True,
                 order_id=order_id,
-                filled_price=signal.entry_price,  # Will be updated by websocket
+                filled_price=signal.entry_price,
                 filled_qty=qty,
                 timestamp=datetime.utcnow()
             )
 
         except Exception as e:
             return OrderResult(success=False, error=str(e))
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        """Cancel a pending order"""
+        try:
+            response = self.client.cancel_order(
+                category="linear",
+                symbol=symbol,
+                orderId=order_id
+            )
+            return response['retCode'] == 0
+        except Exception as e:
+            print(f"Error cancelling order: {e}")
+            return False
+
+    def get_open_orders(self, symbol: str = None) -> list:
+        """Get all open/pending orders"""
+        try:
+            params = {"category": "linear"}
+            if symbol:
+                params["symbol"] = symbol
+
+            response = self.client.get_open_orders(**params)
+            if response['retCode'] == 0:
+                return response['result']['list']
+            return []
+        except Exception as e:
+            print(f"Error getting open orders: {e}")
+            return []
 
     def close_position(
         self,

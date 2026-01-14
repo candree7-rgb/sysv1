@@ -192,6 +192,10 @@ async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coin
     print("[DEBUG] Trading loop started", flush=True)
     loop_count = 0
 
+    # Track pending limit orders: {order_id: {'symbol': str, 'placed_at': datetime, 'signal': Signal}}
+    pending_orders = {}
+    ORDER_EXPIRY_MINUTES = 15  # Cancel unfilled orders after 15 min
+
     while True:
         loop_count += 1
         print(f"[DEBUG] Loop iteration {loop_count}", flush=True)
@@ -209,46 +213,87 @@ async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coin
 
             print(f"\n[{datetime.utcnow()}] Balance: ${balance['equity']:,.2f}", flush=True)
 
+            # Check and cancel expired pending orders
+            now = datetime.utcnow()
+            expired_orders = []
+            for order_id, order_info in pending_orders.items():
+                age_minutes = (now - order_info['placed_at']).total_seconds() / 60
+                if age_minutes > ORDER_EXPIRY_MINUTES:
+                    print(f"Cancelling expired order: {order_info['symbol']} (age: {age_minutes:.1f}min)", flush=True)
+                    if executor.cancel_order(order_info['symbol'], order_id):
+                        expired_orders.append(order_id)
+
+            for order_id in expired_orders:
+                del pending_orders[order_id]
+
+            # Check if pending orders got filled (became positions)
+            filled_orders = []
+            for order_id, order_info in pending_orders.items():
+                position = executor.get_position(order_info['symbol'])
+                if position and position.size > 0:
+                    print(f"Order filled: {order_info['symbol']} @ {position.entry_price}", flush=True)
+                    filled_orders.append(order_id)
+
+                    # Add to position manager
+                    from strategy import Trade
+                    import uuid
+                    signal = order_info['signal']
+                    trade = Trade(
+                        id=str(uuid.uuid4())[:8],
+                        symbol=signal.symbol,
+                        direction=signal.direction,
+                        entry_price=position.entry_price,
+                        entry_time=datetime.utcnow(),
+                        take_profit=signal.take_profit,
+                        stop_loss=signal.stop_loss,
+                        current_sl=signal.stop_loss,
+                        leverage=signal.leverage,
+                        confidence=signal.confidence,
+                        factors=signal.factors
+                    )
+                    position_mgr.open_trade(trade)
+
+            for order_id in filled_orders:
+                del pending_orders[order_id]
+
             # Scan for signals
             print("[DEBUG] Scanning for signals...", flush=True)
             signals = signal_gen.scan_all(coins[:30])
             print(f"[DEBUG] Found {len(signals) if signals else 0} signals", flush=True)
 
             if signals:
-                print(f"Found {len(signals)} signals")
+                print(f"Found {len(signals)} signals", flush=True)
                 for sig in signals[:3]:  # Top 3
                     print(f"  {sig.symbol}: {sig.direction} @ {sig.entry_price:.4f} "
-                          f"(conf: {sig.confidence}%)")
+                          f"(conf: {sig.confidence}%)", flush=True)
 
                 # Execute best signal if conditions met
-                if len(position_mgr.trades) < config.risk.max_concurrent_trades:
+                active_count = len(position_mgr.trades) + len(pending_orders)
+                if active_count < config.risk.max_concurrent_trades:
                     best = signals[0]
-                    can_trade, reason = position_mgr.can_open_trade(best.symbol)
 
-                    if can_trade:
-                        print(f"\nOpening trade: {best.symbol} {best.direction}")
-                        result = executor.open_position(best)
+                    # Check not already pending or in position
+                    symbols_in_use = set(o['symbol'] for o in pending_orders.values())
+                    symbols_in_use.update(t.symbol for t in position_mgr.trades.values())
 
-                        if result.success:
-                            from strategy import Trade
-                            import uuid
-                            trade = Trade(
-                                id=str(uuid.uuid4())[:8],
-                                symbol=best.symbol,
-                                direction=best.direction,
-                                entry_price=best.entry_price,
-                                entry_time=datetime.utcnow(),
-                                take_profit=best.take_profit,
-                                stop_loss=best.stop_loss,
-                                current_sl=best.stop_loss,
-                                leverage=best.leverage,
-                                confidence=best.confidence,
-                                factors=best.factors
-                            )
-                            position_mgr.open_trade(trade)
-                            print(f"Trade opened: {result.order_id}")
-                        else:
-                            print(f"Trade failed: {result.error}")
+                    if best.symbol not in symbols_in_use:
+                        can_trade, reason = position_mgr.can_open_trade(best.symbol)
+
+                        if can_trade:
+                            print(f"\nPlacing LIMIT order: {best.symbol} {best.direction} @ {best.entry_price:.4f}", flush=True)
+                            print(f"  TP: {best.take_profit:.4f} (Limit) | SL: {best.stop_loss:.4f} (Market)", flush=True)
+                            result = executor.open_position(best)
+
+                            if result.success:
+                                # Track pending order
+                                pending_orders[result.order_id] = {
+                                    'symbol': best.symbol,
+                                    'placed_at': datetime.utcnow(),
+                                    'signal': best
+                                }
+                                print(f"Limit order placed: {result.order_id}", flush=True)
+                            else:
+                                print(f"Order failed: {result.error}", flush=True)
 
             # Update positions
             prices = {s: aggregator.get_current_price(s) for s in coins[:30]}
@@ -257,7 +302,10 @@ async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coin
             closed = position_mgr.update_all(prices, datetime.utcnow())
             for trade in closed:
                 print(f"Trade closed: {trade.symbol} "
-                      f"PnL: {trade.pnl_pct:.2f}%")
+                      f"PnL: {trade.pnl_pct:.2f}%", flush=True)
+
+            # Status summary
+            print(f"[Status] Positions: {len(position_mgr.trades)} | Pending: {len(pending_orders)}", flush=True)
 
             # Wait
             await asyncio.sleep(args.interval_seconds)
@@ -265,7 +313,7 @@ async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coin
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            print(f"Loop error: {e}")
+            print(f"Loop error: {e}", flush=True)
             await asyncio.sleep(30)
 
 
