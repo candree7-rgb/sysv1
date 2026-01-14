@@ -434,8 +434,7 @@ class BacktestEngine:
         # ============================================
         # Sweep = #1 (Smart Money aktiv)
         # OB = #2 (Institutional Orders)
-        # FVG = #3 (Imbalance, weniger zuverlässig)
-        # RSI = Timing-Hilfe
+        # FVG = #3 (Imbalance, akzeptabel als Alternative)
 
         # 1. REQUIRED: Liquidity Sweep (wichtigstes Signal!)
         has_sweep = False
@@ -450,31 +449,31 @@ class BacktestEngine:
             self._debug_counts['no_sweep'] = self._debug_counts.get('no_sweep', 0) + 1
             return None
 
-        # 2. REQUIRED: Near Order Block (sehr wichtig nach Sweep!)
+        # 2. Near Order Block (beste Confluence)
         near_ob = False
         for ob in active_obs:
             dist = abs(price - ob.mid) / price * 100
-            if dist < 0.5:  # Within 0.5%
+            if dist < 1.0:  # Wider: within 1%
                 if (direction == 'long' and ob.is_bullish) or \
                    (direction == 'short' and not ob.is_bullish):
-                    score += 25  # Zweithöchster Wert
+                    score += 25  # Hoher Wert
                     near_ob = True
                     break
 
-        # OB ist Pflicht - FVG allein reicht nicht!
-        if not near_ob:
-            self._debug_counts['no_ob'] = self._debug_counts.get('no_ob', 0) + 1
-            return None
-
-        # 3. BONUS: In FVG (extra Confluence)
+        # 3. In FVG (alternative Confluence)
         in_fvg = False
         for fvg in active_fvgs:
             if fvg.bottom <= price <= fvg.top:
                 if (direction == 'long' and fvg.is_bullish) or \
                    (direction == 'short' and not fvg.is_bullish):
-                    score += 10
+                    score += 15  # Weniger als OB
                     in_fvg = True
                     break
+
+        # REQUIRED: Mindestens OB oder FVG
+        if not near_ob and not in_fvg:
+            self._debug_counts['no_ob_or_fvg'] = self._debug_counts.get('no_ob_or_fvg', 0) + 1
+            return None
 
         # 4. BONUS: RSI extreme (besseres Timing)
         rsi = candle.get('rsi', 50)
@@ -483,9 +482,9 @@ class BacktestEngine:
         elif direction == 'short' and rsi > 65:
             score += 10
 
-        # 5. BONUS: FVG + RSI combo
-        if in_fvg and ((direction == 'long' and rsi < 35) or (direction == 'short' and rsi > 65)):
-            score += 5
+        # 5. BONUS: OB + FVG combo (beste Setup)
+        if near_ob and in_fvg:
+            score += 10
 
         # Regime adjustment
         score = int(score * regime.leverage_multiplier)
