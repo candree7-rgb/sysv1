@@ -430,64 +430,62 @@ class BacktestEngine:
             return None  # No clear direction
 
         # ============================================
-        # ULTRA-STRICT SMC FILTERING
-        # Require: Sweep + (OB or FVG) + RSI extreme
+        # SMC SCORING - Based on real trading value
         # ============================================
+        # Sweep = #1 (Smart Money aktiv)
+        # OB = #2 (Institutional Orders)
+        # FVG = #3 (Imbalance, weniger zuverlässig)
+        # RSI = Timing-Hilfe
 
-        # 1. REQUIRED: Liquidity Sweep
+        # 1. REQUIRED: Liquidity Sweep (wichtigstes Signal!)
         has_sweep = False
         for sweep in recent_sweeps:
             if (direction == 'long' and sweep.is_bullish) or \
                (direction == 'short' and not sweep.is_bullish):
                 has_sweep = True
-                score += 20
+                score += 30  # Höchster Wert!
                 break
 
         if not has_sweep:
             self._debug_counts['no_sweep'] = self._debug_counts.get('no_sweep', 0) + 1
             return None
 
-        # 2. REQUIRED: Near Order Block OR in FVG
+        # 2. REQUIRED: Near Order Block (sehr wichtig nach Sweep!)
         near_ob = False
         for ob in active_obs:
             dist = abs(price - ob.mid) / price * 100
-            if dist < 0.3:  # Very tight: within 0.3%
+            if dist < 0.5:  # Within 0.5%
                 if (direction == 'long' and ob.is_bullish) or \
                    (direction == 'short' and not ob.is_bullish):
-                    score += 20
+                    score += 25  # Zweithöchster Wert
                     near_ob = True
                     break
 
+        # OB ist Pflicht - FVG allein reicht nicht!
+        if not near_ob:
+            self._debug_counts['no_ob'] = self._debug_counts.get('no_ob', 0) + 1
+            return None
+
+        # 3. BONUS: In FVG (extra Confluence)
         in_fvg = False
         for fvg in active_fvgs:
             if fvg.bottom <= price <= fvg.top:
                 if (direction == 'long' and fvg.is_bullish) or \
                    (direction == 'short' and not fvg.is_bullish):
-                    score += 15
+                    score += 10
                     in_fvg = True
                     break
 
-        if not near_ob and not in_fvg:
-            self._debug_counts['no_ob_or_fvg'] = self._debug_counts.get('no_ob_or_fvg', 0) + 1
-            return None
-
-        # 3. REQUIRED: RSI extreme (oversold/overbought)
+        # 4. BONUS: RSI extreme (besseres Timing)
         rsi = candle.get('rsi', 50)
-        rsi_extreme = False
-        if direction == 'long' and rsi < 30:
-            score += 15
-            rsi_extreme = True
-        elif direction == 'short' and rsi > 70:
-            score += 15
-            rsi_extreme = True
-
-        if not rsi_extreme:
-            self._debug_counts['no_rsi_extreme'] = self._debug_counts.get('no_rsi_extreme', 0) + 1
-            return None
-
-        # Bonus: Both OB and FVG
-        if near_ob and in_fvg:
+        if direction == 'long' and rsi < 35:
             score += 10
+        elif direction == 'short' and rsi > 65:
+            score += 10
+
+        # 5. BONUS: FVG + RSI combo
+        if in_fvg and ((direction == 'long' and rsi < 35) or (direction == 'short' and rsi > 65)):
+            score += 5
 
         # Regime adjustment
         score = int(score * regime.leverage_multiplier)
