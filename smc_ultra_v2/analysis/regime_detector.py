@@ -275,9 +275,9 @@ class RegimeDetector:
         if total == 0:
             return 'neutral', 0
 
-        if bullish_score > bearish_score + 2:
+        if bullish_score > bearish_score + 1:
             return 'up', bullish_score / total
-        elif bearish_score > bullish_score + 2:
+        elif bearish_score > bullish_score + 1:
             return 'down', bearish_score / total
         else:
             return 'neutral', abs(bullish_score - bearish_score) / total
