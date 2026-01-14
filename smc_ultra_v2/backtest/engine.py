@@ -479,16 +479,16 @@ class BacktestEngine:
             self._debug_counts['low_score'] = self._debug_counts.get('low_score', 0) + 1
             return None
 
-        # Calculate targets
+        # Calculate targets - 1:2 RR (Risk 1, Reward 2)
         atr = candle['atr']
         if direction == 'long':
             entry = price * (1 + self.bt_config.slippage_pct / 100)
-            sl = entry - atr * 1.0
-            tp = entry + atr * 1.0  # 1:1 RR
+            sl = entry - atr * 1.5   # Wider SL to avoid noise
+            tp = entry + atr * 3.0   # 1:2 RR
         else:
             entry = price * (1 - self.bt_config.slippage_pct / 100)
-            sl = entry + atr * 1.0
-            tp = entry - atr * 1.0
+            sl = entry + atr * 1.5
+            tp = entry - atr * 3.0
 
         sl_pct = abs(entry - sl) / entry * 100
         tp_pct = abs(tp - entry) / entry * 100
