@@ -78,6 +78,15 @@ class BybitExecutor:
 
     def get_balance(self) -> Dict:
         """Get account balance"""
+        def safe_float(val, default=0.0):
+            """Safely convert to float, handling empty strings"""
+            if val is None or val == '':
+                return default
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return default
+
         try:
             response = self.client.get_wallet_balance(
                 accountType="UNIFIED",
@@ -88,10 +97,18 @@ class BybitExecutor:
                 coins = response['result']['list'][0]['coin']
                 usdt = next((c for c in coins if c['coin'] == 'USDT'), None)
                 if usdt:
+                    equity = safe_float(usdt.get('equity'), 0)
+                    available = safe_float(usdt.get('availableToWithdraw'), 0)
+                    pnl = safe_float(usdt.get('unrealisedPnl'), 0)
+
+                    # Check if account has any balance
+                    if equity == 0 and available == 0:
+                        return {'error': 'No USDT balance in testnet account. Please add funds on testnet.bybit.com'}
+
                     return {
-                        'equity': float(usdt['equity']),
-                        'available': float(usdt['availableToWithdraw']),
-                        'unrealized_pnl': float(usdt.get('unrealisedPnl', 0))
+                        'equity': equity,
+                        'available': available,
+                        'unrealized_pnl': pnl
                     }
 
             return {'error': response.get('retMsg', 'Unknown error')}
