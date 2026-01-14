@@ -8,7 +8,17 @@ Downloads data and starts the bot automatically.
 import os
 import sys
 import asyncio
+import threading
 from datetime import datetime
+
+# Suppress pybit WebSocket thread errors (cosmetic, doesn't affect operation)
+def _silent_thread_exception(args):
+    if 'WebSocketConnectionClosedException' in str(args.exc_type):
+        pass  # Ignore WebSocket closed errors in background threads
+    else:
+        sys.__excepthook__(args.exc_type, args.exc_value, args.exc_traceback)
+
+threading.excepthook = _silent_thread_exception
 
 # Config from env
 MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest
