@@ -151,44 +151,32 @@ class RegimeConfig:
         'strong_trend_up': {
             'trade': True,
             'direction': 'long_only',
-            'min_confidence': 80,
+            'min_confidence': 90,
             'tp_multiplier': 1.5,
             'leverage_mult': 1.0
         },
         'strong_trend_down': {
             'trade': True,
             'direction': 'short_only',
-            'min_confidence': 80,
+            'min_confidence': 90,
             'tp_multiplier': 1.5,
             'leverage_mult': 1.0
         },
         'weak_trend_up': {
-            'trade': True,
-            'direction': 'long_only',
-            'min_confidence': 85,
-            'tp_multiplier': 1.0,
-            'leverage_mult': 0.8
+            'trade': False,
+            'reason': 'weak_trend_disabled'
         },
         'weak_trend_down': {
-            'trade': True,
-            'direction': 'short_only',
-            'min_confidence': 85,
-            'tp_multiplier': 1.0,
-            'leverage_mult': 0.8
+            'trade': False,
+            'reason': 'weak_trend_disabled'
         },
         'ranging': {
-            'trade': True,
-            'direction': 'both',
-            'min_confidence': 90,
-            'tp_multiplier': 0.7,
-            'leverage_mult': 0.6
+            'trade': False,
+            'reason': 'ranging_disabled'
         },
         'high_volatility': {
-            'trade': True,
-            'direction': 'both',
-            'min_confidence': 92,
-            'tp_multiplier': 0.8,
-            'leverage_mult': 0.4
+            'trade': False,
+            'reason': 'high_volatility_disabled'
         },
         'choppy': {
             'trade': False,
