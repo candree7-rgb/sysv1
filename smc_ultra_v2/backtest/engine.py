@@ -267,8 +267,8 @@ class BacktestEngine:
         print(f"  Simulating {total} bars...")
 
         for i, ts in enumerate(timestamps):
-            if i % 5000 == 0:
-                print(f"    Progress: {i}/{total} ({i/total*100:.1f}%)")
+            if i % 500 == 0:
+                print(f"    Progress: {i}/{total} ({i/total*100:.1f}%)", flush=True)
 
             # 1. Update active trades
             self._update_trades(ts)
