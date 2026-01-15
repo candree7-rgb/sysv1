@@ -32,7 +32,11 @@ class SetupType(Enum):
 TAKER_FEE_PCT = 0.055    # Bybit taker fee per side
 MAKER_FEE_PCT = 0.02     # Bybit maker fee per side
 SLIPPAGE_PCT = 0.02      # Realistic slippage
-DEFAULT_LEVERAGE = 10    # For fee calculation
+
+# Dynamic leverage settings
+RISK_PER_TRADE_PCT = 2.0  # Risk 2% of account per trade
+MAX_LEVERAGE = 50         # Cap leverage at 50x
+MIN_LEVERAGE = 5          # Minimum leverage
 
 
 @dataclass
@@ -44,10 +48,13 @@ class Trade:
     sl: float
     tp: float
     entry_time: datetime
+    leverage: int = 10           # Dynamic leverage
+    sl_pct: float = 0.0          # SL distance in %
     exit_time: datetime = None
     exit_price: float = None
-    pnl_pct: float = None
-    result: str = None  # 'win', 'loss'
+    pnl_pct: float = None        # RAW pnl (without leverage)
+    pnl_leveraged: float = None  # Leveraged pnl
+    result: str = None           # 'win', 'loss'
 
 
 class SMCStrategyTester:
@@ -205,7 +212,7 @@ class SMCStrategyTester:
 
     def _create_trade(self, setup: SetupType, symbol: str, direction: str,
                       price: float, atr: float, ts: datetime) -> Trade:
-        """Create a trade with 1:1.5 RR"""
+        """Create a trade with 1:1.5 RR and dynamic leverage"""
         sl_mult = 1.0
         tp_mult = 1.5  # 1:1.5 RR
 
@@ -218,6 +225,18 @@ class SMCStrategyTester:
             sl = entry + atr * sl_mult
             tp = entry - atr * tp_mult
 
+        # Calculate dynamic leverage based on SL distance
+        sl_pct = abs(entry - sl) / entry * 100
+
+        # Leverage formula: risk_per_trade / sl_pct
+        # Example: 2% risk / 0.5% SL = 4x leverage (to risk 2% of account)
+        if sl_pct > 0:
+            calculated_lev = RISK_PER_TRADE_PCT / sl_pct
+            leverage = min(int(calculated_lev), MAX_LEVERAGE)
+            leverage = max(leverage, MIN_LEVERAGE)
+        else:
+            leverage = MIN_LEVERAGE
+
         return Trade(
             setup=setup,
             symbol=symbol,
@@ -225,15 +244,18 @@ class SMCStrategyTester:
             entry=entry,
             sl=sl,
             tp=tp,
-            entry_time=ts
+            entry_time=ts,
+            leverage=leverage,
+            sl_pct=sl_pct
         )
 
     def _check_trade_exit(self, trade: Trade, candle) -> bool:
-        """Check if trade should exit - WITH REALISTIC FEES!"""
+        """Check if trade should exit - WITH REALISTIC FEES & LEVERAGE!"""
         # Fee structure:
         # - Entry: Limit order = MAKER_FEE (0.02%)
         # - TP exit: Limit order = MAKER_FEE (0.02%)
         # - SL exit: Market order = TAKER_FEE (0.055%)
+        # Note: Fees apply to leveraged position size
         fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)    # ~0.08% for TP hit
         fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)  # ~0.115% for SL hit
 
@@ -242,14 +264,16 @@ class SMCStrategyTester:
                 trade.exit_price = trade.sl
                 trade.result = 'loss'
                 gross_pnl = (trade.sl - trade.entry) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_loss  # Market order on SL
+                trade.pnl_pct = gross_pnl - fee_loss  # Raw PnL after fees
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage  # Leveraged PnL
                 trade.exit_time = candle['timestamp']
                 return True
             elif candle['high'] >= trade.tp:
                 trade.exit_price = trade.tp
                 trade.result = 'win'
                 gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_win  # Limit order on TP
+                trade.pnl_pct = gross_pnl - fee_win
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
                 trade.exit_time = candle['timestamp']
                 return True
         else:
@@ -258,6 +282,7 @@ class SMCStrategyTester:
                 trade.result = 'loss'
                 gross_pnl = (trade.entry - trade.sl) / trade.entry * 100
                 trade.pnl_pct = gross_pnl - fee_loss
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
                 trade.exit_time = candle['timestamp']
                 return True
             elif candle['low'] <= trade.tp:
@@ -265,18 +290,19 @@ class SMCStrategyTester:
                 trade.result = 'win'
                 gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
                 trade.pnl_pct = gross_pnl - fee_win
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
                 trade.exit_time = candle['timestamp']
                 return True
 
         return False
 
     def _print_results(self):
-        """Print comparison results"""
-        print("\n" + "=" * 80)
-        print("SMC STRATEGY COMPARISON RESULTS")
-        print("=" * 80)
-        print(f"{'Setup':<20} {'Trades':>8} {'Winners':>8} {'Losers':>8} {'WR%':>8} {'AvgWin':>8} {'AvgLoss':>8} {'PF':>8}")
-        print("-" * 80)
+        """Print comparison results with leverage stats"""
+        print("\n" + "=" * 100)
+        print("SMC STRATEGY COMPARISON RESULTS (with Dynamic Leverage)")
+        print("=" * 100)
+        print(f"{'Setup':<15} {'Trades':>7} {'Win':>5} {'Loss':>5} {'WR%':>7} {'AvgLev':>7} {'AvgWin':>9} {'AvgLoss':>9} {'TotalPnL':>10}")
+        print("-" * 100)
 
         results = []
 
@@ -284,7 +310,7 @@ class SMCStrategyTester:
             trades = self.trades_by_setup[setup_type]
 
             if not trades:
-                print(f"{setup_type.value:<20} {'NO TRADES':>8}")
+                print(f"{setup_type.value:<15} {'NO TRADES':>7}")
                 continue
 
             winners = [t for t in trades if t.result == 'win']
@@ -295,59 +321,99 @@ class SMCStrategyTester:
             loss_count = len(losers)
             win_rate = win_count / total * 100 if total > 0 else 0
 
-            avg_win = sum(t.pnl_pct for t in winners) / len(winners) if winners else 0
-            avg_loss = abs(sum(t.pnl_pct for t in losers) / len(losers)) if losers else 0
+            # Average leverage used
+            avg_leverage = sum(t.leverage for t in trades) / len(trades) if trades else 0
 
-            gross_win = sum(t.pnl_pct for t in winners) if winners else 0
-            gross_loss = abs(sum(t.pnl_pct for t in losers)) if losers else 1
-            pf = gross_win / gross_loss if gross_loss > 0 else gross_win
+            # Leveraged PnL stats
+            avg_win_lev = sum(t.pnl_leveraged for t in winners) / len(winners) if winners else 0
+            avg_loss_lev = abs(sum(t.pnl_leveraged for t in losers) / len(losers)) if losers else 0
 
-            print(f"{setup_type.value:<20} {total:>8} {win_count:>8} {loss_count:>8} "
-                  f"{win_rate:>7.1f}% {avg_win:>7.2f}% {avg_loss:>7.2f}% {pf:>7.2f}")
+            gross_win_lev = sum(t.pnl_leveraged for t in winners) if winners else 0
+            gross_loss_lev = abs(sum(t.pnl_leveraged for t in losers)) if losers else 1
+            pf = gross_win_lev / gross_loss_lev if gross_loss_lev > 0 else gross_win_lev
+
+            total_pnl_lev = gross_win_lev - gross_loss_lev
+
+            print(f"{setup_type.value:<15} {total:>7} {win_count:>5} {loss_count:>5} "
+                  f"{win_rate:>6.1f}% {avg_leverage:>6.1f}x {avg_win_lev:>+8.2f}% {avg_loss_lev:>8.2f}% {total_pnl_lev:>+9.2f}%")
 
             results.append({
                 'setup': setup_type.value,
                 'trades': total,
                 'win_rate': win_rate,
-                'avg_win': avg_win,
-                'avg_loss': avg_loss,
+                'avg_leverage': avg_leverage,
+                'avg_win': avg_win_lev,
+                'avg_loss': avg_loss_lev,
                 'profit_factor': pf,
-                'total_pnl': gross_win - gross_loss
+                'total_pnl': total_pnl_lev
             })
 
-        # Sort by win rate
-        results.sort(key=lambda x: x['win_rate'], reverse=True)
+        # Sort by total PnL (with leverage)
+        results.sort(key=lambda x: x['total_pnl'], reverse=True)
 
         if results:
             best = results[0]
-            print("\n" + "=" * 80)
-            print(f"🏆 BEST SETUP: {best['setup'].upper()}")
+            print("\n" + "=" * 100)
+            print(f"BEST SETUP: {best['setup'].upper()}")
             print(f"   Win Rate: {best['win_rate']:.1f}%")
+            print(f"   Avg Leverage: {best['avg_leverage']:.1f}x")
             print(f"   Profit Factor: {best['profit_factor']:.2f}")
+            print(f"   Total PnL (leveraged): {best['total_pnl']:+.2f}%")
             print(f"   Trades: {best['trades']}")
-            print("=" * 80)
+            print("=" * 100)
 
         # Per-coin breakdown for best setup
         if results:
             best_setup = SetupType(results[0]['setup'])
-            print(f"\n{results[0]['setup'].upper()} - Per Coin Breakdown:")
-            print("-" * 50)
+            print(f"\n{results[0]['setup'].upper()} - Per Coin Breakdown (Leveraged PnL):")
+            print("-" * 60)
 
             coin_stats = {}
             for trade in self.trades_by_setup[best_setup]:
                 if trade.symbol not in coin_stats:
-                    coin_stats[trade.symbol] = {'wins': 0, 'losses': 0, 'pnl': 0}
+                    coin_stats[trade.symbol] = {'wins': 0, 'losses': 0, 'pnl': 0, 'avg_lev': []}
 
                 if trade.result == 'win':
                     coin_stats[trade.symbol]['wins'] += 1
                 else:
                     coin_stats[trade.symbol]['losses'] += 1
-                coin_stats[trade.symbol]['pnl'] += trade.pnl_pct
+                coin_stats[trade.symbol]['pnl'] += trade.pnl_leveraged
+                coin_stats[trade.symbol]['avg_lev'].append(trade.leverage)
 
             for symbol, stats in sorted(coin_stats.items(), key=lambda x: -x[1]['pnl']):
                 total = stats['wins'] + stats['losses']
                 wr = stats['wins'] / total * 100 if total > 0 else 0
-                print(f"  {symbol:<12} {total:>3} trades, {wr:>5.1f}% WR, {stats['pnl']:>+6.2f}% PnL")
+                avg_lev = sum(stats['avg_lev']) / len(stats['avg_lev']) if stats['avg_lev'] else 0
+                print(f"  {symbol:<12} {total:>3} trades, {wr:>5.1f}% WR, {avg_lev:>4.1f}x lev, {stats['pnl']:>+8.2f}% PnL")
+
+        # Simulate account growth with $10,000
+        if results:
+            best_setup = SetupType(results[0]['setup'])
+            print(f"\n{'='*60}")
+            print("SIMULATED ACCOUNT GROWTH ($10,000 start, 1% per trade)")
+            print("="*60)
+
+            for setup_type in SetupType:
+                trades = self.trades_by_setup[setup_type]
+                if not trades:
+                    continue
+
+                equity = 10000.0
+                peak = 10000.0
+                max_dd = 0.0
+
+                for trade in sorted(trades, key=lambda t: t.entry_time):
+                    # Each trade risks 1% of current equity
+                    trade_size = equity * 0.01
+                    # PnL is already leveraged, apply to 1% position
+                    pnl_usd = trade_size * trade.pnl_leveraged / 100
+                    equity += pnl_usd
+                    peak = max(peak, equity)
+                    dd = (peak - equity) / peak * 100
+                    max_dd = max(max_dd, dd)
+
+                return_pct = (equity - 10000) / 10000 * 100
+                print(f"  {setup_type.value:<15} $10,000 -> ${equity:>10,.2f} ({return_pct:>+7.2f}%)  MaxDD: {max_dd:.1f}%")
 
 
 def run_comparison(num_coins: int = 30, days: int = 14):

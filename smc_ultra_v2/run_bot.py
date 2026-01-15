@@ -189,9 +189,9 @@ def run_optimizer():
 def run_compare():
     """Run SMC strategy comparison"""
     print("\n" + "=" * 60, flush=True)
-    print("SMC STRATEGY COMPARISON", flush=True)
+    print("SMC STRATEGY COMPARISON (with Dynamic Leverage)", flush=True)
     print("=" * 60, flush=True)
-    print("Testing: SWEEP+OB, SWEEP+FVG, SWEEP+OB+FVG, OB_ONLY, FVG_ONLY", flush=True)
+    print("Testing: SWEEP_FVG, FVG_ONLY", flush=True)
 
     from strategy_comparison import run_comparison
 
