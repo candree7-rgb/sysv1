@@ -164,6 +164,28 @@ def run_backtest():
     print(f"{'='*50}", flush=True)
 
 
+def run_optimizer():
+    """Run strategy optimizer to find best parameters"""
+    print("\n" + "=" * 60, flush=True)
+    print("STRATEGY OPTIMIZER - Finding Best Parameters", flush=True)
+    print("=" * 60, flush=True)
+
+    from optimizer import run_optimization
+
+    # Run optimization
+    results = run_optimization(
+        num_coins=NUM_COINS,
+        days=BACKTEST_DAYS,
+        fast=True  # Use fast grid for Railway (full grid takes too long)
+    )
+
+    if results:
+        best = results[0]
+        print(f"\n🏆 BEST STRATEGY: {best['config']}", flush=True)
+        print(f"   Win Rate: {best['win_rate']}%", flush=True)
+        print(f"   Profit Factor: {best['profit_factor']}", flush=True)
+
+
 def main():
     print("\n[DEBUG] Starting main()", flush=True)
 
@@ -175,12 +197,15 @@ def main():
     if MODE == 'backtest':
         print("[DEBUG] Calling run_backtest()...", flush=True)
         run_backtest()
+    elif MODE == 'optimize':
+        print("[DEBUG] Calling run_optimizer()...", flush=True)
+        run_optimizer()
     elif MODE in ['paper', 'live']:
         print("[DEBUG] Calling run_paper_trading()", flush=True)
         run_paper_trading()
     else:
         print(f"Unknown mode: {MODE}")
-        print("Set BOT_MODE to: paper, live, or backtest")
+        print("Set BOT_MODE to: paper, live, backtest, or optimize")
 
 
 if __name__ == '__main__':
