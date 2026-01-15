@@ -186,6 +186,21 @@ def run_optimizer():
         print(f"   Profit Factor: {best['profit_factor']}", flush=True)
 
 
+def run_compare():
+    """Run SMC strategy comparison"""
+    print("\n" + "=" * 60, flush=True)
+    print("SMC STRATEGY COMPARISON", flush=True)
+    print("=" * 60, flush=True)
+    print("Testing: SWEEP+OB, SWEEP+FVG, SWEEP+OB+FVG, OB_ONLY, FVG_ONLY", flush=True)
+
+    from strategy_comparison import run_comparison
+
+    run_comparison(
+        num_coins=NUM_COINS,
+        days=BACKTEST_DAYS
+    )
+
+
 def main():
     print("\n[DEBUG] Starting main()", flush=True)
 
@@ -200,12 +215,15 @@ def main():
     elif MODE == 'optimize':
         print("[DEBUG] Calling run_optimizer()...", flush=True)
         run_optimizer()
+    elif MODE == 'compare':
+        print("[DEBUG] Calling run_compare()...", flush=True)
+        run_compare()
     elif MODE in ['paper', 'live']:
         print("[DEBUG] Calling run_paper_trading()", flush=True)
         run_paper_trading()
     else:
         print(f"Unknown mode: {MODE}")
-        print("Set BOT_MODE to: paper, live, backtest, or optimize")
+        print("Set BOT_MODE to: paper, live, backtest, optimize, or compare")
 
 
 if __name__ == '__main__':
