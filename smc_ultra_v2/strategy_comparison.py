@@ -24,8 +24,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 class SetupType(Enum):
-    SWEEP_FVG = "sweep_fvg"         # Sweep + FVG (best combo)
-    FVG_ONLY = "fvg_only"           # Just FVG (highest WR)
+    # More selective setups to find what actually works
+    FRESH_FVG = "fresh_fvg"              # FVG < 10 candles old
+    QUALITY_FVG = "quality_fvg"          # Large FVG + strong impulse
+    SWEEP_FRESH_FVG = "sweep_fresh_fvg"  # Sweep + Fresh FVG
+    TRIPLE_CONF = "triple_conf"          # Sweep + FVG + near OB
+    OB_RETEST = "ob_retest"              # Price retests OB zone
 
 
 # Trading costs (REALISTIC)
@@ -213,41 +217,73 @@ class SMCStrategyTester:
                     has_sweep = True
                     break
 
-            # Check for OB nearby
+            # Check for OB nearby (price near or inside OB zone)
             near_ob = False
+            in_ob = False
             for ob in active_obs:
                 dist = abs(price - ob.mid) / price * 100
-                if dist < 1.5:  # Within 1.5%
-                    if (trend == 'long' and ob.is_bullish) or (trend == 'short' and not ob.is_bullish):
+                if (trend == 'long' and ob.is_bullish) or (trend == 'short' and not ob.is_bullish):
+                    if dist < 1.5:
                         near_ob = True
+                    if ob.bottom <= price <= ob.top:
+                        in_ob = True
                         break
 
-            # Check for FVG
+            # Check for FVG with quality metrics
             in_fvg = False
+            fresh_fvg = False      # FVG < 10 candles old
+            quality_fvg = False    # Large + strong impulse
+            current_fvg = None
+
             for fvg in active_fvgs:
                 if fvg.bottom <= price <= fvg.top:
                     if (trend == 'long' and fvg.is_bullish) or (trend == 'short' and not fvg.is_bullish):
                         in_fvg = True
+                        current_fvg = fvg
+
+                        # Check freshness: FVG formed recently
+                        fvg_age_minutes = (ts - fvg.timestamp).total_seconds() / 60
+                        fvg_age_candles = fvg_age_minutes / 5  # 5min candles
+                        if fvg_age_candles <= 10:
+                            fresh_fvg = True
+
+                        # Check quality: large gap + strong impulse
+                        if fvg.size_pct >= 0.2 and fvg.impulse_strength >= 1.2:
+                            quality_fvg = True
+
                         break
 
-            # === SETUP DETECTION (FVG strategies only) ===
+            # === SETUP DETECTION (More Selective!) ===
             # Respect MAX_TRADES limit (same as live trading)
 
-            # 1. SWEEP + FVG (Premium Setup)
-            if (has_sweep and in_fvg
-                and active_trades[SetupType.SWEEP_FVG] is None
-                and len(self.active_trades_global[SetupType.SWEEP_FVG]) < MAX_TRADES_PER_SETUP):
-                trade = self._create_trade(SetupType.SWEEP_FVG, symbol, trend, price, atr, ts)
-                active_trades[SetupType.SWEEP_FVG] = trade
-                self.active_trades_global[SetupType.SWEEP_FVG].append(trade)
+            def can_open(setup_type):
+                return (active_trades[setup_type] is None and
+                        len(self.active_trades_global[setup_type]) < MAX_TRADES_PER_SETUP)
 
-            # 2. FVG Only (High WR Setup)
-            if (in_fvg
-                and active_trades[SetupType.FVG_ONLY] is None
-                and len(self.active_trades_global[SetupType.FVG_ONLY]) < MAX_TRADES_PER_SETUP):
-                trade = self._create_trade(SetupType.FVG_ONLY, symbol, trend, price, atr, ts)
-                active_trades[SetupType.FVG_ONLY] = trade
-                self.active_trades_global[SetupType.FVG_ONLY].append(trade)
+            def open_trade(setup_type):
+                trade = self._create_trade(setup_type, symbol, trend, price, atr, ts)
+                active_trades[setup_type] = trade
+                self.active_trades_global[setup_type].append(trade)
+
+            # 1. FRESH_FVG - Only FVGs < 10 candles old
+            if fresh_fvg and can_open(SetupType.FRESH_FVG):
+                open_trade(SetupType.FRESH_FVG)
+
+            # 2. QUALITY_FVG - Large FVG + strong impulse
+            if quality_fvg and can_open(SetupType.QUALITY_FVG):
+                open_trade(SetupType.QUALITY_FVG)
+
+            # 3. SWEEP_FRESH_FVG - Sweep + Fresh FVG (best combo?)
+            if has_sweep and fresh_fvg and can_open(SetupType.SWEEP_FRESH_FVG):
+                open_trade(SetupType.SWEEP_FRESH_FVG)
+
+            # 4. TRIPLE_CONF - Sweep + FVG + near OB
+            if has_sweep and in_fvg and near_ob and can_open(SetupType.TRIPLE_CONF):
+                open_trade(SetupType.TRIPLE_CONF)
+
+            # 5. OB_RETEST - Price inside OB zone
+            if in_ob and can_open(SetupType.OB_RETEST):
+                open_trade(SetupType.OB_RETEST)
 
     def _create_trade(self, setup: SetupType, symbol: str, direction: str,
                       price: float, atr: float, ts: datetime) -> Trade:
