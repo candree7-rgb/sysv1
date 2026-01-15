@@ -24,11 +24,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 class SetupType(Enum):
-    SWEEP_OB = "sweep_ob"           # Sweep + Order Block
-    SWEEP_FVG = "sweep_fvg"         # Sweep + FVG
-    SWEEP_OB_FVG = "sweep_ob_fvg"   # Triple Confluence
-    OB_ONLY = "ob_only"             # Just OB
-    FVG_ONLY = "fvg_only"           # Just FVG
+    SWEEP_FVG = "sweep_fvg"         # Sweep + FVG (best combo)
+    FVG_ONLY = "fvg_only"           # Just FVG (highest WR)
+
+
+# Trading costs (REALISTIC)
+TAKER_FEE_PCT = 0.055    # Bybit taker fee per side
+MAKER_FEE_PCT = 0.02     # Bybit maker fee per side
+SLIPPAGE_PCT = 0.02      # Realistic slippage
+DEFAULT_LEVERAGE = 10    # For fee calculation
 
 
 @dataclass
@@ -185,33 +189,15 @@ class SMCStrategyTester:
                         in_fvg = True
                         break
 
-            # === SETUP DETECTION ===
+            # === SETUP DETECTION (FVG strategies only) ===
 
-            # 1. SWEEP + OB (Classic SMC)
-            if has_sweep and near_ob and active_trades[SetupType.SWEEP_OB] is None:
-                active_trades[SetupType.SWEEP_OB] = self._create_trade(
-                    SetupType.SWEEP_OB, symbol, trend, price, atr, ts
-                )
-
-            # 2. SWEEP + FVG
+            # 1. SWEEP + FVG (Premium Setup)
             if has_sweep and in_fvg and active_trades[SetupType.SWEEP_FVG] is None:
                 active_trades[SetupType.SWEEP_FVG] = self._create_trade(
                     SetupType.SWEEP_FVG, symbol, trend, price, atr, ts
                 )
 
-            # 3. SWEEP + OB + FVG (Triple)
-            if has_sweep and near_ob and in_fvg and active_trades[SetupType.SWEEP_OB_FVG] is None:
-                active_trades[SetupType.SWEEP_OB_FVG] = self._create_trade(
-                    SetupType.SWEEP_OB_FVG, symbol, trend, price, atr, ts
-                )
-
-            # 4. OB Only (Baseline)
-            if near_ob and active_trades[SetupType.OB_ONLY] is None:
-                active_trades[SetupType.OB_ONLY] = self._create_trade(
-                    SetupType.OB_ONLY, symbol, trend, price, atr, ts
-                )
-
-            # 5. FVG Only (Baseline)
+            # 2. FVG Only (High WR Setup)
             if in_fvg and active_trades[SetupType.FVG_ONLY] is None:
                 active_trades[SetupType.FVG_ONLY] = self._create_trade(
                     SetupType.FVG_ONLY, symbol, trend, price, atr, ts
@@ -243,31 +229,38 @@ class SMCStrategyTester:
         )
 
     def _check_trade_exit(self, trade: Trade, candle) -> bool:
-        """Check if trade should exit"""
+        """Check if trade should exit - WITH FEES!"""
+        # Round-trip fees (entry + exit)
+        fee_round_trip = (TAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)  # ~0.15%
+
         if trade.direction == 'long':
             if candle['low'] <= trade.sl:
                 trade.exit_price = trade.sl
                 trade.result = 'loss'
-                trade.pnl_pct = (trade.sl - trade.entry) / trade.entry * 100
+                gross_pnl = (trade.sl - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_round_trip  # Fees make loss worse
                 trade.exit_time = candle['timestamp']
                 return True
             elif candle['high'] >= trade.tp:
                 trade.exit_price = trade.tp
                 trade.result = 'win'
-                trade.pnl_pct = (trade.tp - trade.entry) / trade.entry * 100
+                gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_round_trip  # Fees reduce win
                 trade.exit_time = candle['timestamp']
                 return True
         else:
             if candle['high'] >= trade.sl:
                 trade.exit_price = trade.sl
                 trade.result = 'loss'
-                trade.pnl_pct = (trade.entry - trade.sl) / trade.entry * 100
+                gross_pnl = (trade.entry - trade.sl) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_round_trip
                 trade.exit_time = candle['timestamp']
                 return True
             elif candle['low'] <= trade.tp:
                 trade.exit_price = trade.tp
                 trade.result = 'win'
-                trade.pnl_pct = (trade.entry - trade.tp) / trade.entry * 100
+                gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_round_trip
                 trade.exit_time = candle['timestamp']
                 return True
 
