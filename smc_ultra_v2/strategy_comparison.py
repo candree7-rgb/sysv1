@@ -24,11 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 class SetupType(Enum):
-    # More selective setups to find what actually works
-    FRESH_FVG = "fresh_fvg"              # FVG < 10 candles old
-    QUALITY_FVG = "quality_fvg"          # Large FVG + strong impulse
-    SWEEP_FRESH_FVG = "sweep_fresh_fvg"  # Sweep + Fresh FVG
-    TRIPLE_CONF = "triple_conf"          # Sweep + FVG + near OB
+    # Only test OB_RETEST - the winner from previous test
     OB_RETEST = "ob_retest"              # Price retests OB zone
 
 
@@ -253,37 +249,16 @@ class SMCStrategyTester:
 
                         break
 
-            # === SETUP DETECTION (More Selective!) ===
+            # === SETUP DETECTION (Only OB_RETEST) ===
             # Respect MAX_TRADES limit (same as live trading)
 
-            def can_open(setup_type):
-                return (active_trades[setup_type] is None and
-                        len(self.active_trades_global[setup_type]) < MAX_TRADES_PER_SETUP)
-
-            def open_trade(setup_type):
-                trade = self._create_trade(setup_type, symbol, trend, price, atr, ts)
-                active_trades[setup_type] = trade
-                self.active_trades_global[setup_type].append(trade)
-
-            # 1. FRESH_FVG - Only FVGs < 10 candles old
-            if fresh_fvg and can_open(SetupType.FRESH_FVG):
-                open_trade(SetupType.FRESH_FVG)
-
-            # 2. QUALITY_FVG - Large FVG + strong impulse
-            if quality_fvg and can_open(SetupType.QUALITY_FVG):
-                open_trade(SetupType.QUALITY_FVG)
-
-            # 3. SWEEP_FRESH_FVG - Sweep + Fresh FVG (best combo?)
-            if has_sweep and fresh_fvg and can_open(SetupType.SWEEP_FRESH_FVG):
-                open_trade(SetupType.SWEEP_FRESH_FVG)
-
-            # 4. TRIPLE_CONF - Sweep + FVG + near OB
-            if has_sweep and in_fvg and near_ob and can_open(SetupType.TRIPLE_CONF):
-                open_trade(SetupType.TRIPLE_CONF)
-
-            # 5. OB_RETEST - Price inside OB zone
-            if in_ob and can_open(SetupType.OB_RETEST):
-                open_trade(SetupType.OB_RETEST)
+            # OB_RETEST - Price inside OB zone
+            if (in_ob
+                and active_trades[SetupType.OB_RETEST] is None
+                and len(self.active_trades_global[SetupType.OB_RETEST]) < MAX_TRADES_PER_SETUP):
+                trade = self._create_trade(SetupType.OB_RETEST, symbol, trend, price, atr, ts)
+                active_trades[SetupType.OB_RETEST] = trade
+                self.active_trades_global[SetupType.OB_RETEST].append(trade)
 
     def _create_trade(self, setup: SetupType, symbol: str, direction: str,
                       price: float, atr: float, ts: datetime) -> Trade:

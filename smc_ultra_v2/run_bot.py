@@ -22,11 +22,11 @@ threading.excepthook = _silent_thread_exception
 
 # Config from env
 MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest
-NUM_COINS = int(os.getenv('BOT_COINS', '30'))  # Number of coins to trade
+NUM_COINS = int(os.getenv('BOT_COINS', '100'))  # Number of coins to trade (100 for better sample)
 USE_TESTNET = os.getenv('USE_TESTNET', 'false').lower() == 'true'  # true = testnet.bybit.com, false = bybit.com demo
 MIN_CONFIDENCE = int(os.getenv('MIN_CONFIDENCE', '60'))  # Minimum confidence for trades
 MAX_TRADES = int(os.getenv('MAX_TRADES', '5'))  # Max concurrent trades
-BACKTEST_DAYS = int(os.getenv('BACKTEST_DAYS', '7'))  # Days to backtest
+BACKTEST_DAYS = int(os.getenv('BACKTEST_DAYS', '90'))  # Days to backtest (90 for better sample)
 
 
 def download_minimal_data():
@@ -189,9 +189,9 @@ def run_optimizer():
 def run_compare():
     """Run SMC strategy comparison"""
     print("\n" + "=" * 60, flush=True)
-    print("SMC STRATEGY COMPARISON (with Dynamic Leverage)", flush=True)
+    print("OB_RETEST BACKTEST (90 days, 100 coins)", flush=True)
     print("=" * 60, flush=True)
-    print("Testing: SWEEP_FVG, FVG_ONLY", flush=True)
+    print(f"Testing OB_RETEST with {NUM_COINS} coins over {BACKTEST_DAYS} days", flush=True)
 
     from strategy_comparison import run_comparison
 
