@@ -38,9 +38,10 @@ RISK_PER_TRADE_PCT = 2.0  # Risk 2% of account per trade
 MAX_LEVERAGE = 50         # Cap leverage at 50x
 MIN_LEVERAGE = 5          # Minimum leverage
 
-# Max concurrent trades per setup (from ENV, same as live)
-# Use 5 for backtest to get better sample size
-MAX_TRADES_PER_SETUP = int(os.getenv('MAX_TRADES', '5'))
+# Max concurrent trades - SEPARATED by direction for hedging!
+# Max 2 longs + Max 2 shorts = hedged exposure
+MAX_LONGS = int(os.getenv('MAX_LONGS', '2'))
+MAX_SHORTS = int(os.getenv('MAX_SHORTS', '2'))
 
 
 @dataclass
@@ -69,8 +70,9 @@ class SMCStrategyTester:
         self.days = days
         self.data = {}
         self.trades_by_setup: Dict[SetupType, List[Trade]] = {s: [] for s in SetupType}
-        # Track active trades across ALL symbols (for MAX_TRADES limit)
-        self.active_trades_global: Dict[SetupType, List[Trade]] = {s: [] for s in SetupType}
+        # Track active trades by DIRECTION for hedged exposure
+        self.active_longs: List[Trade] = []
+        self.active_shorts: List[Trade] = []
 
     def load_data(self):
         """Load and prepare data"""
@@ -156,13 +158,9 @@ class SMCStrategyTester:
             if pd.isna(atr) or atr <= 0:
                 continue
 
-            # First: Update global active trades - close any that hit SL/TP
-            for setup_type in SetupType:
-                # Remove closed trades from global tracking
-                self.active_trades_global[setup_type] = [
-                    t for t in self.active_trades_global[setup_type]
-                    if t.exit_time is None or t.exit_time > ts
-                ]
+            # First: Update active trades by direction - remove closed ones
+            self.active_longs = [t for t in self.active_longs if t.exit_time is None or t.exit_time > ts]
+            self.active_shorts = [t for t in self.active_shorts if t.exit_time is None or t.exit_time > ts]
 
             # Check and close active trades for THIS symbol
             for setup_type in SetupType:
@@ -171,9 +169,11 @@ class SMCStrategyTester:
                     closed = self._check_trade_exit(trade, candle)
                     if closed:
                         self.trades_by_setup[setup_type].append(trade)
-                        # Remove from global tracking
-                        if trade in self.active_trades_global[setup_type]:
-                            self.active_trades_global[setup_type].remove(trade)
+                        # Remove from direction tracking
+                        if trade.direction == 'long' and trade in self.active_longs:
+                            self.active_longs.remove(trade)
+                        elif trade.direction == 'short' and trade in self.active_shorts:
+                            self.active_shorts.remove(trade)
                         active_trades[setup_type] = None
 
             # Get trend direction
@@ -251,15 +251,22 @@ class SMCStrategyTester:
                         break
 
             # === SETUP DETECTION (Only OB_RETEST) ===
-            # Respect MAX_TRADES limit (same as live trading)
+            # Respect MAX_LONGS / MAX_SHORTS limits (hedged exposure)
+
+            # Check if we can open based on direction
+            can_open_long = len(self.active_longs) < MAX_LONGS
+            can_open_short = len(self.active_shorts) < MAX_SHORTS
 
             # OB_RETEST - Price inside OB zone
-            if (in_ob
-                and active_trades[SetupType.OB_RETEST] is None
-                and len(self.active_trades_global[SetupType.OB_RETEST]) < MAX_TRADES_PER_SETUP):
-                trade = self._create_trade(SetupType.OB_RETEST, symbol, trend, price, atr, ts)
-                active_trades[SetupType.OB_RETEST] = trade
-                self.active_trades_global[SetupType.OB_RETEST].append(trade)
+            if in_ob and active_trades[SetupType.OB_RETEST] is None:
+                if (trend == 'long' and can_open_long) or (trend == 'short' and can_open_short):
+                    trade = self._create_trade(SetupType.OB_RETEST, symbol, trend, price, atr, ts)
+                    active_trades[SetupType.OB_RETEST] = trade
+                    # Track by direction
+                    if trend == 'long':
+                        self.active_longs.append(trade)
+                    else:
+                        self.active_shorts.append(trade)
 
     def _create_trade(self, setup: SetupType, symbol: str, direction: str,
                       price: float, atr: float, ts: datetime) -> Trade:
@@ -475,7 +482,7 @@ def run_comparison(num_coins: int = 30, days: int = 14):
     """Run the strategy comparison"""
     from config.coins import get_top_n_coins
 
-    print(f"Settings: MAX_TRADES={MAX_TRADES_PER_SETUP}, RISK={RISK_PER_TRADE_PCT}%", flush=True)
+    print(f"Settings: MAX_LONGS={MAX_LONGS}, MAX_SHORTS={MAX_SHORTS}, RISK={RISK_PER_TRADE_PCT}%", flush=True)
     print("NOTE: Look-ahead bias FIXED - results now realistic!", flush=True)
 
     coins = get_top_n_coins(num_coins)
