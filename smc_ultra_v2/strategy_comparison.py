@@ -39,7 +39,8 @@ MAX_LEVERAGE = 50         # Cap leverage at 50x
 MIN_LEVERAGE = 5          # Minimum leverage
 
 # Max concurrent trades per setup (from ENV, same as live)
-MAX_TRADES_PER_SETUP = int(os.getenv('MAX_TRADES', '2'))
+# Use 5 for backtest to get better sample size
+MAX_TRADES_PER_SETUP = int(os.getenv('MAX_TRADES', '5'))
 
 
 @dataclass
