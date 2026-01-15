@@ -387,11 +387,14 @@ class SMCStrategyTester:
                 print(f"  {symbol:<12} {total:>3} trades, {wr:>5.1f}% WR, {avg_lev:>4.1f}x lev, {stats['pnl']:>+8.2f}% PnL")
 
         # Simulate account growth with $10,000
+        # The leverage is calculated as: leverage = RISK_PER_TRADE / sl_pct
+        # This means pnl_leveraged already represents the % of account risked/gained
+        # Win: ~+3% of account (2% risk × 1.5 RR)
+        # Loss: ~-2% of account (the risk)
         if results:
-            best_setup = SetupType(results[0]['setup'])
-            print(f"\n{'='*60}")
-            print("SIMULATED ACCOUNT GROWTH ($10,000 start, 1% per trade)")
-            print("="*60)
+            print(f"\n{'='*70}")
+            print(f"SIMULATED ACCOUNT GROWTH ($10,000 start, {RISK_PER_TRADE_PCT}% risk per trade)")
+            print("="*70)
 
             for setup_type in SetupType:
                 trades = self.trades_by_setup[setup_type]
@@ -403,10 +406,11 @@ class SMCStrategyTester:
                 max_dd = 0.0
 
                 for trade in sorted(trades, key=lambda t: t.entry_time):
-                    # Each trade risks 1% of current equity
-                    trade_size = equity * 0.01
-                    # PnL is already leveraged, apply to 1% position
-                    pnl_usd = trade_size * trade.pnl_leveraged / 100
+                    # pnl_leveraged IS the account % change
+                    # Because leverage = risk / sl_pct, the math works out:
+                    # - Loss: sl_pct × leverage = sl_pct × (risk/sl_pct) = risk = ~2%
+                    # - Win: tp_pct × leverage = tp_pct × (risk/sl_pct) = risk × RR = ~3%
+                    pnl_usd = equity * (trade.pnl_leveraged / 100)
                     equity += pnl_usd
                     peak = max(peak, equity)
                     dd = (peak - equity) / peak * 100
