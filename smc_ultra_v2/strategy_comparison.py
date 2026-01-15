@@ -38,6 +38,9 @@ RISK_PER_TRADE_PCT = 2.0  # Risk 2% of account per trade
 MAX_LEVERAGE = 50         # Cap leverage at 50x
 MIN_LEVERAGE = 5          # Minimum leverage
 
+# Max concurrent trades per setup (from ENV, same as live)
+MAX_TRADES_PER_SETUP = int(os.getenv('MAX_TRADES', '2'))
+
 
 @dataclass
 class Trade:
@@ -65,6 +68,8 @@ class SMCStrategyTester:
         self.days = days
         self.data = {}
         self.trades_by_setup: Dict[SetupType, List[Trade]] = {s: [] for s in SetupType}
+        # Track active trades across ALL symbols (for MAX_TRADES limit)
+        self.active_trades_global: Dict[SetupType, List[Trade]] = {s: [] for s in SetupType}
 
     def load_data(self):
         """Load and prepare data"""
@@ -150,13 +155,24 @@ class SMCStrategyTester:
             if pd.isna(atr) or atr <= 0:
                 continue
 
-            # Check and close active trades
+            # First: Update global active trades - close any that hit SL/TP
+            for setup_type in SetupType:
+                # Remove closed trades from global tracking
+                self.active_trades_global[setup_type] = [
+                    t for t in self.active_trades_global[setup_type]
+                    if t.exit_time is None or t.exit_time > ts
+                ]
+
+            # Check and close active trades for THIS symbol
             for setup_type in SetupType:
                 trade = active_trades[setup_type]
                 if trade:
                     closed = self._check_trade_exit(trade, candle)
                     if closed:
                         self.trades_by_setup[setup_type].append(trade)
+                        # Remove from global tracking
+                        if trade in self.active_trades_global[setup_type]:
+                            self.active_trades_global[setup_type].remove(trade)
                         active_trades[setup_type] = None
 
             # Get trend direction
@@ -167,10 +183,28 @@ class SMCStrategyTester:
             else:
                 continue  # No clear trend
 
-            # Get recent structures
+            # Get recent structures - FIXED for look-ahead bias!
             recent_sweeps = [s for s in sweeps if ts - timedelta(hours=2) <= s.timestamp <= ts]
-            active_obs = [ob for ob in obs if ob.timestamp < ts and not ob.is_mitigated]
-            active_fvgs = [fvg for fvg in fvgs if fvg.timestamp < ts and not fvg.is_filled]
+
+            # FIXED: Check mitigation timestamp to avoid look-ahead bias!
+            active_obs = []
+            for ob in obs:
+                if ob.timestamp >= ts:
+                    continue  # OB hasn't formed yet
+                if not ob.is_mitigated:
+                    active_obs.append(ob)  # Never mitigated - OK
+                elif ob.mitigation_timestamp is not None and ob.mitigation_timestamp > ts:
+                    active_obs.append(ob)  # Mitigated AFTER current time - still valid now!
+
+            # FIXED: Check FVG fill timestamp to avoid look-ahead bias!
+            active_fvgs = []
+            for fvg in fvgs:
+                if fvg.timestamp >= ts:
+                    continue  # FVG hasn't formed yet
+                if not fvg.is_filled:
+                    active_fvgs.append(fvg)  # Never filled - OK
+                elif fvg.fill_timestamp is not None and fvg.fill_timestamp > ts:
+                    active_fvgs.append(fvg)  # Filled AFTER current time - still valid now!
 
             # Check for sweep in our direction
             has_sweep = False
@@ -197,18 +231,23 @@ class SMCStrategyTester:
                         break
 
             # === SETUP DETECTION (FVG strategies only) ===
+            # Respect MAX_TRADES limit (same as live trading)
 
             # 1. SWEEP + FVG (Premium Setup)
-            if has_sweep and in_fvg and active_trades[SetupType.SWEEP_FVG] is None:
-                active_trades[SetupType.SWEEP_FVG] = self._create_trade(
-                    SetupType.SWEEP_FVG, symbol, trend, price, atr, ts
-                )
+            if (has_sweep and in_fvg
+                and active_trades[SetupType.SWEEP_FVG] is None
+                and len(self.active_trades_global[SetupType.SWEEP_FVG]) < MAX_TRADES_PER_SETUP):
+                trade = self._create_trade(SetupType.SWEEP_FVG, symbol, trend, price, atr, ts)
+                active_trades[SetupType.SWEEP_FVG] = trade
+                self.active_trades_global[SetupType.SWEEP_FVG].append(trade)
 
             # 2. FVG Only (High WR Setup)
-            if in_fvg and active_trades[SetupType.FVG_ONLY] is None:
-                active_trades[SetupType.FVG_ONLY] = self._create_trade(
-                    SetupType.FVG_ONLY, symbol, trend, price, atr, ts
-                )
+            if (in_fvg
+                and active_trades[SetupType.FVG_ONLY] is None
+                and len(self.active_trades_global[SetupType.FVG_ONLY]) < MAX_TRADES_PER_SETUP):
+                trade = self._create_trade(SetupType.FVG_ONLY, symbol, trend, price, atr, ts)
+                active_trades[SetupType.FVG_ONLY] = trade
+                self.active_trades_global[SetupType.FVG_ONLY].append(trade)
 
     def _create_trade(self, setup: SetupType, symbol: str, direction: str,
                       price: float, atr: float, ts: datetime) -> Trade:
@@ -423,6 +462,9 @@ class SMCStrategyTester:
 def run_comparison(num_coins: int = 30, days: int = 14):
     """Run the strategy comparison"""
     from config.coins import get_top_n_coins
+
+    print(f"Settings: MAX_TRADES={MAX_TRADES_PER_SETUP}, RISK={RISK_PER_TRADE_PCT}%", flush=True)
+    print("NOTE: Look-ahead bias FIXED - results now realistic!", flush=True)
 
     coins = get_top_n_coins(num_coins)
 
