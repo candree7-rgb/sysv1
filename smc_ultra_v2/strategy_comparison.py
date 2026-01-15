@@ -229,23 +229,27 @@ class SMCStrategyTester:
         )
 
     def _check_trade_exit(self, trade: Trade, candle) -> bool:
-        """Check if trade should exit - WITH FEES!"""
-        # Round-trip fees (entry + exit)
-        fee_round_trip = (TAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)  # ~0.15%
+        """Check if trade should exit - WITH REALISTIC FEES!"""
+        # Fee structure:
+        # - Entry: Limit order = MAKER_FEE (0.02%)
+        # - TP exit: Limit order = MAKER_FEE (0.02%)
+        # - SL exit: Market order = TAKER_FEE (0.055%)
+        fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)    # ~0.08% for TP hit
+        fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)  # ~0.115% for SL hit
 
         if trade.direction == 'long':
             if candle['low'] <= trade.sl:
                 trade.exit_price = trade.sl
                 trade.result = 'loss'
                 gross_pnl = (trade.sl - trade.entry) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_round_trip  # Fees make loss worse
+                trade.pnl_pct = gross_pnl - fee_loss  # Market order on SL
                 trade.exit_time = candle['timestamp']
                 return True
             elif candle['high'] >= trade.tp:
                 trade.exit_price = trade.tp
                 trade.result = 'win'
                 gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_round_trip  # Fees reduce win
+                trade.pnl_pct = gross_pnl - fee_win  # Limit order on TP
                 trade.exit_time = candle['timestamp']
                 return True
         else:
@@ -253,14 +257,14 @@ class SMCStrategyTester:
                 trade.exit_price = trade.sl
                 trade.result = 'loss'
                 gross_pnl = (trade.entry - trade.sl) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_round_trip
+                trade.pnl_pct = gross_pnl - fee_loss
                 trade.exit_time = candle['timestamp']
                 return True
             elif candle['low'] <= trade.tp:
                 trade.exit_price = trade.tp
                 trade.result = 'win'
                 gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_round_trip
+                trade.pnl_pct = gross_pnl - fee_win
                 trade.exit_time = candle['timestamp']
                 return True
 
