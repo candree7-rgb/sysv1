@@ -25,7 +25,9 @@ MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest
 NUM_COINS = int(os.getenv('BOT_COINS', '100'))  # Number of coins to trade (100 for better sample)
 USE_TESTNET = os.getenv('USE_TESTNET', 'false').lower() == 'true'  # true = testnet.bybit.com, false = bybit.com demo
 MIN_CONFIDENCE = int(os.getenv('MIN_CONFIDENCE', '60'))  # Minimum confidence for trades
-MAX_TRADES = int(os.getenv('MAX_TRADES', '5'))  # Max concurrent trades
+# Hedged exposure: separate limits for longs and shorts
+MAX_LONGS = int(os.getenv('MAX_LONGS', '2'))    # Max 2 long trades
+MAX_SHORTS = int(os.getenv('MAX_SHORTS', '2'))  # Max 2 short trades
 BACKTEST_DAYS = int(os.getenv('BACKTEST_DAYS', '90'))  # Days to backtest (90 for better sample)
 
 
@@ -139,10 +141,10 @@ def run_backtest():
         end_date=end,
         initial_capital=10000,
         min_confidence=MIN_CONFIDENCE,  # From ENV
-        max_trades=MAX_TRADES  # From ENV
+        max_trades=MAX_LONGS + MAX_SHORTS  # Total from hedged limits
     )
 
-    print(f"[DEBUG] Config: min_confidence={MIN_CONFIDENCE}, max_trades={MAX_TRADES}", flush=True)
+    print(f"[DEBUG] Config: min_confidence={MIN_CONFIDENCE}, max_longs={MAX_LONGS}, max_shorts={MAX_SHORTS}", flush=True)
 
     print("[DEBUG] Creating BacktestEngine...", flush=True)
     engine = BacktestEngine(bt_config)
