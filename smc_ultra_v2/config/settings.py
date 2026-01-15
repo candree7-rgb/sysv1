@@ -115,19 +115,19 @@ class ExitConfig:
     min_tp_pct: float = 0.15           # Minimum TP
     max_tp_pct: float = 0.60           # Maximum TP
 
-    # Break-even - DISABLED for pure 1:1 RR
-    break_even_at_pct: float = 100.0   # Never trigger (let trades run to TP/SL)
+    # Break-even - lock in profit at 60% of TP
+    break_even_at_pct: float = 60.0    # Move SL to BE at 60% of TP
 
-    # Trailing stop - DISABLED for pure 1:1 RR
-    trailing_start_pct: float = 100.0  # Never trigger (need full TP wins)
-    trailing_offset_pct: float = 30.0  # Irrelevant when disabled
+    # Trailing stop - maximize gains after 75%
+    trailing_start_pct: float = 75.0   # Start trailing at 75% of TP
+    trailing_offset_pct: float = 25.0  # Trail 25% behind peak (tight)
 
-    # Time-based exit - increased for more time
-    max_trade_duration_minutes: int = 240  # 4 hours to reach TP
+    # Time-based exit - scalps should be FAST
+    max_trade_duration_minutes: int = 30  # 30 min max for scalp
 
-    # Momentum exit - DISABLED for pure 1:1 RR
-    enable_momentum_exit: bool = False
-    momentum_exit_min_profit_pct: float = 100.0
+    # Momentum exit - exit on fading momentum
+    enable_momentum_exit: bool = True
+    momentum_exit_min_profit_pct: float = 40.0  # Exit if momentum fades at 40%+
 
 
 @dataclass

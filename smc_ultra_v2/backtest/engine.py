@@ -430,67 +430,82 @@ class BacktestEngine:
             return None  # No clear direction
 
         # ============================================
-        # ULTRA-SELECTIVE: Only the BEST setups
+        # HIGH VOLATILITY SCALPING STRATEGY
+        # Key: High vol = fast directional moves = quick TP hits
         # ============================================
 
-        # 0. REQUIRED: Only STRONG trends (no weak/ranging)
-        if regime.regime.value not in ('strong_trend_up', 'strong_trend_down'):
-            self._debug_counts['not_strong_trend'] = self._debug_counts.get('not_strong_trend', 0) + 1
+        # 0. REQUIRED: HIGH VOLATILITY (ATR above average)
+        # This is the KEY - in high vol, price moves fast and hits TP
+        atr_pct = candle.get('atr_pct', 0)
+        volume_ratio = candle.get('volume_ratio', 1.0)
+
+        # Calculate if volatility is expanding (ATR > recent average)
+        recent_atr = hist['atr_pct'].tail(20).mean() if 'atr_pct' in hist.columns else atr_pct
+        vol_expanding = atr_pct > recent_atr * 1.2  # ATR 20% above average
+
+        if not vol_expanding:
+            self._debug_counts['low_volatility'] = self._debug_counts.get('low_volatility', 0) + 1
             return None
 
-        # 1. REQUIRED: Liquidity Sweep
+        score += 25  # High vol bonus
+
+        # 1. REQUIRED: Volume confirmation (smart money active)
+        if volume_ratio < 1.0:  # Below average volume
+            self._debug_counts['low_volume'] = self._debug_counts.get('low_volume', 0) + 1
+            return None
+
+        if volume_ratio > 1.5:
+            score += 15  # High volume bonus
+
+        # 2. REQUIRED: Not in choppy/ranging market
+        if regime.regime.value == 'ranging':
+            self._debug_counts['regime_ranging_skip'] = self._debug_counts.get('regime_ranging_skip', 0) + 1
+            return None
+
+        # 3. BONUS: Trend alignment (not required but adds confidence)
+        if regime.regime.value in ('strong_trend_up', 'strong_trend_down'):
+            score += 20
+        elif regime.regime.value in ('weak_trend_up', 'weak_trend_down'):
+            score += 10
+
+        # 4. BONUS: Liquidity Sweep (SMC confluence)
         has_sweep = False
         for sweep in recent_sweeps:
             if (direction == 'long' and sweep.is_bullish) or \
                (direction == 'short' and not sweep.is_bullish):
                 has_sweep = True
-                score += 30
+                score += 20
                 break
 
-        if not has_sweep:
-            self._debug_counts['no_sweep'] = self._debug_counts.get('no_sweep', 0) + 1
-            return None
-
-        # 2. REQUIRED: RSI EXTREME (very strict!)
+        # 5. BONUS: RSI divergence/extreme
         rsi = candle.get('rsi', 50)
-        rsi_ok = False
-        if direction == 'long' and rsi < 35:  # Must be oversold
-            score += 20
-            rsi_ok = True
-        elif direction == 'short' and rsi > 65:  # Must be overbought
-            score += 20
-            rsi_ok = True
+        if direction == 'long' and rsi < 40:
+            score += 15
+        elif direction == 'short' and rsi > 60:
+            score += 15
 
-        if not rsi_ok:
-            self._debug_counts['rsi_not_extreme'] = self._debug_counts.get('rsi_not_extreme', 0) + 1
-            return None
-
-        # 3. BONUS: Near Order Block
+        # 6. BONUS: Near Order Block
         near_ob = False
         for ob in active_obs:
             dist = abs(price - ob.mid) / price * 100
             if dist < 2.0:
                 if (direction == 'long' and ob.is_bullish) or \
                    (direction == 'short' and not ob.is_bullish):
-                    score += 20
+                    score += 15
                     near_ob = True
                     break
 
-        # 4. BONUS: In FVG
+        # 7. BONUS: In FVG
         in_fvg = False
         for fvg in active_fvgs:
             if fvg.bottom <= price <= fvg.top:
                 if (direction == 'long' and fvg.is_bullish) or \
                    (direction == 'short' and not fvg.is_bullish):
-                    score += 15
+                    score += 10
                     in_fvg = True
                     break
 
-        # 5. BONUS: Multiple confluences
-        if near_ob and in_fvg:
-            score += 10
-
-        # Regime adjustment
+        # Regime confidence multiplier
         score = int(score * regime.leverage_multiplier)
 
         # Track score distribution
@@ -507,16 +522,16 @@ class BacktestEngine:
             self._debug_counts['low_score'] = self._debug_counts.get('low_score', 0) + 1
             return None
 
-        # Calculate targets - wider SL to let trades breathe
+        # Calculate targets - TIGHT for scalping (high vol = fast moves)
         atr = candle['atr']
         if direction == 'long':
             entry = price * (1 + self.bt_config.slippage_pct / 100)
-            sl = entry - atr * 2.0   # Wide SL - room to breathe
-            tp = entry + atr * 2.0   # 1:1 RR with room
+            sl = entry - atr * 0.8   # Tight SL - high vol means fast move
+            tp = entry + atr * 1.0   # 1:1.25 RR - slightly better odds
         else:
             entry = price * (1 - self.bt_config.slippage_pct / 100)
-            sl = entry + atr * 2.0   # Wide SL
-            tp = entry - atr * 2.0   # 1:1 RR
+            sl = entry + atr * 0.8   # Tight SL
+            tp = entry - atr * 1.0   # 1:1.25 RR
 
         sl_pct = abs(entry - sl) / entry * 100
         tp_pct = abs(tp - entry) / entry * 100
