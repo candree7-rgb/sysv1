@@ -209,9 +209,9 @@ def process_coin_for_variant(args) -> List[Trade]:
         active_trade = None
         pending_signal = None  # Store signal from previous candle for next-bar entry
 
-        for idx in range(50, len(df_5m) - 1):  # -1 because we need idx+1 for fill check
+        for idx in range(50, len(df_5m) - 1):  # -1 because we need idx+1 for exit checks
             candle = df_5m.iloc[idx]
-            next_candle = df_5m.iloc[idx + 1]  # Next candle for fill verification
+            next_candle = df_5m.iloc[idx + 1]  # Next candle for exit verification
             ts = candle['timestamp']
             next_ts = next_candle['timestamp']
             price = candle['close']
@@ -235,25 +235,26 @@ def process_coin_for_variant(args) -> List[Trade]:
 
             # =====================================================
             # NEXT-BAR ENTRY: Check if pending signal fills
+            # Signal was detected at idx-1, fill checked on idx (current candle)
             # =====================================================
             if pending_signal:
                 sig = pending_signal
                 pending_signal = None  # Clear it
 
-                # Check if next_candle fills our limit order
+                # Check if CURRENT candle fills our limit order (placed after previous candle close)
                 # Long: price must DROP to ob.top (low <= ob.top)
                 # Short: price must RISE to ob.bottom (high >= ob.bottom)
                 filled = False
-                if sig['trend'] == 'long' and next_candle['low'] <= sig['ob'].top:
+                if sig['trend'] == 'long' and candle['low'] <= sig['ob'].top:
                     filled = True
-                elif sig['trend'] == 'short' and next_candle['high'] >= sig['ob'].bottom:
+                elif sig['trend'] == 'short' and candle['high'] >= sig['ob'].bottom:
                     filled = True
 
                 if filled:
-                    # Create trade with next_candle timestamp (realistic fill time)
+                    # Create trade with current candle timestamp (realistic fill time)
                     active_trade = create_trade_with_variant(
                         symbol, sig['trend'], sig['price'], sig['atr'],
-                        next_ts, sig['ob'], variant  # Use next_ts as entry time
+                        ts, sig['ob'], variant  # Use ts (current candle) as entry time
                     )
                     continue  # Don't look for new signals this candle
 
