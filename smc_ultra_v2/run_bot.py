@@ -203,6 +203,21 @@ def run_compare():
     )
 
 
+def run_variants():
+    """Run multi-variant strategy comparison to find optimal parameters"""
+    print("\n" + "=" * 60, flush=True)
+    print("STRATEGY VARIANTS COMPARISON", flush=True)
+    print("=" * 60, flush=True)
+    print(f"Testing 12 variants with {NUM_COINS} coins over {BACKTEST_DAYS} days", flush=True)
+
+    from strategy_variants import run_variant_comparison
+
+    run_variant_comparison(
+        num_coins=NUM_COINS,
+        days=BACKTEST_DAYS
+    )
+
+
 def main():
     print("\n[DEBUG] Starting main()", flush=True)
 
@@ -220,12 +235,15 @@ def main():
     elif MODE == 'compare':
         print("[DEBUG] Calling run_compare()...", flush=True)
         run_compare()
+    elif MODE == 'variants':
+        print("[DEBUG] Calling run_variants()...", flush=True)
+        run_variants()
     elif MODE in ['paper', 'live']:
         print("[DEBUG] Calling run_paper_trading()", flush=True)
         run_paper_trading()
     else:
         print(f"Unknown mode: {MODE}")
-        print("Set BOT_MODE to: paper, live, backtest, optimize, or compare")
+        print("Set BOT_MODE to: paper, live, backtest, optimize, compare, or variants")
 
 
 if __name__ == '__main__':
