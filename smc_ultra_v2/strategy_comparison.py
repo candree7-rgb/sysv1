@@ -1,7 +1,7 @@
 """
-SMC Strategy Comparison - PARALLELIZED VERSION
-==============================================
-8x faster with multiprocessing!
+SMC Strategy Comparison - PARALLELIZED VERSION with 1MIN EXIT PRECISION
+========================================================================
+Uses 5min for signals, 1min for precise SL/TP exit checking!
 """
 
 import os
@@ -42,6 +42,9 @@ OB_MAX_AGE_CANDLES = int(os.getenv('OB_MAX_AGE', '100'))       # Max OB age in c
 # Parallelization
 NUM_WORKERS = int(os.getenv('NUM_WORKERS', str(min(8, cpu_count()))))
 
+# Precision mode: use 1min candles for exit checking
+USE_1MIN_EXITS = True
+
 
 @dataclass
 class Trade:
@@ -62,7 +65,11 @@ class Trade:
 
 
 def process_single_coin(args) -> List[Trade]:
-    """Process a single coin - can be run in parallel"""
+    """Process a single coin - can be run in parallel
+
+    Uses 5min candles for signal generation (OB detection, EMA trend)
+    Uses 1min candles for precise SL/TP exit checking
+    """
     symbol, days = args
 
     # Disable SSL verification for subprocesses (both ssl and requests)
@@ -87,35 +94,50 @@ def process_single_coin(args) -> List[Trade]:
         end = datetime.now()
         start = end - timedelta(days=days + 5)
 
-        df = dl.load_or_download(symbol, "5", days + 10)
-        if df is None or len(df) < 200:
+        # Load 5min data for signal generation
+        df_5m = dl.load_or_download(symbol, "5", days + 10)
+        if df_5m is None or len(df_5m) < 200:
             return []
 
-        # Filter date range
-        mask = (df['timestamp'] >= start) & (df['timestamp'] <= end)
-        df = df[mask].reset_index(drop=True)
+        # Load 1min data for precise exit checking
+        df_1m = None
+        if USE_1MIN_EXITS:
+            df_1m = dl.load_or_download(symbol, "1", days + 10)
+            if df_1m is None or len(df_1m) < 1000:
+                # Fall back to 5min exits if 1min not available
+                df_1m = None
 
-        if len(df) < 100:
+        # Filter date range for 5min
+        mask = (df_5m['timestamp'] >= start) & (df_5m['timestamp'] <= end)
+        df_5m = df_5m[mask].reset_index(drop=True)
+
+        if len(df_5m) < 100:
             return []
 
-        # Calculate indicators
-        high_low = df['high'] - df['low']
-        high_close = abs(df['high'] - df['close'].shift())
-        low_close = abs(df['low'] - df['close'].shift())
+        # Filter 1min data if available
+        if df_1m is not None:
+            mask = (df_1m['timestamp'] >= start) & (df_1m['timestamp'] <= end)
+            df_1m = df_1m[mask].reset_index(drop=True)
+
+        # Calculate indicators on 5min
+        high_low = df_5m['high'] - df_5m['low']
+        high_close = abs(df_5m['high'] - df_5m['close'].shift())
+        low_close = abs(df_5m['low'] - df_5m['close'].shift())
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df['atr'] = tr.rolling(14).mean()
-        df['ema20'] = df['close'].ewm(span=20).mean()
-        df['ema50'] = df['close'].ewm(span=50).mean()
+        df_5m['atr'] = tr.rolling(14).mean()
+        df_5m['ema20'] = df_5m['close'].ewm(span=20).mean()
+        df_5m['ema50'] = df_5m['close'].ewm(span=50).mean()
 
-        # Detect OBs
-        atr = df['atr']
-        obs = ob_det.detect(df, atr)
+        # Detect OBs on 5min
+        atr = df_5m['atr']
+        obs = ob_det.detect(df_5m, atr)
 
         # Run backtest for this coin
         active_trade = None
+        pending_trades = []  # Trades waiting for exit check
 
-        for idx in range(50, len(df)):
-            candle = df.iloc[idx]
+        for idx in range(50, len(df_5m)):
+            candle = df_5m.iloc[idx]
             ts = candle['timestamp']
             price = candle['close']
             atr_val = candle['atr']
@@ -123,9 +145,15 @@ def process_single_coin(args) -> List[Trade]:
             if pd.isna(atr_val) or atr_val <= 0:
                 continue
 
-            # Check and close active trade
+            # Check and close active trade using 1min precision
             if active_trade:
-                closed = check_trade_exit(active_trade, candle)
+                if df_1m is not None and USE_1MIN_EXITS:
+                    # Use 1min candles for precise exit
+                    closed = check_trade_exit_1min(active_trade, df_1m, ts)
+                else:
+                    # Fallback to 5min
+                    closed = check_trade_exit(active_trade, candle)
+
                 if closed:
                     trades.append(active_trade)
                     active_trade = None
@@ -174,9 +202,12 @@ def process_single_coin(args) -> List[Trade]:
                 active_trade = create_trade(symbol, trend, price, atr_val, ts)
 
         # Close any remaining trade
-        if active_trade and len(df) > 0:
-            last_candle = df.iloc[-1]
-            check_trade_exit(active_trade, last_candle)
+        if active_trade and len(df_5m) > 0:
+            last_candle = df_5m.iloc[-1]
+            if df_1m is not None and USE_1MIN_EXITS:
+                check_trade_exit_1min(active_trade, df_1m, last_candle['timestamp'])
+            else:
+                check_trade_exit(active_trade, last_candle)
             if active_trade.exit_time:
                 trades.append(active_trade)
 
@@ -184,6 +215,65 @@ def process_single_coin(args) -> List[Trade]:
         print(f"  Error processing {symbol}: {e}", flush=True)
 
     return trades
+
+
+def check_trade_exit_1min(trade: Trade, df_1m: pd.DataFrame, current_5m_ts: datetime) -> bool:
+    """Check trade exit using 1min candles for precision.
+
+    Iterates through 1min candles from trade entry to current 5min candle.
+    This gives us exact order of SL vs TP hits.
+    """
+    fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)
+    fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)
+
+    # Get 1min candles from entry time to current 5min candle
+    mask = (df_1m['timestamp'] > trade.entry_time) & (df_1m['timestamp'] <= current_5m_ts)
+    candles_to_check = df_1m[mask]
+
+    if len(candles_to_check) == 0:
+        return False
+
+    for _, candle in candles_to_check.iterrows():
+        if trade.direction == 'long':
+            # Check SL first (hit if low <= sl)
+            if candle['low'] <= trade.sl:
+                trade.exit_price = trade.sl
+                trade.result = 'loss'
+                gross_pnl = (trade.sl - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_loss
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+            # Check TP (hit if high >= tp)
+            elif candle['high'] >= trade.tp:
+                trade.exit_price = trade.tp
+                trade.result = 'win'
+                gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_win
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+        else:  # short
+            # Check SL first (hit if high >= sl)
+            if candle['high'] >= trade.sl:
+                trade.exit_price = trade.sl
+                trade.result = 'loss'
+                gross_pnl = (trade.entry - trade.sl) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_loss
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+            # Check TP (hit if low <= tp)
+            elif candle['low'] <= trade.tp:
+                trade.exit_price = trade.tp
+                trade.result = 'win'
+                gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_win
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+
+    return False
 
 
 def create_trade(symbol: str, direction: str, price: float, atr: float, ts: datetime) -> Trade:
@@ -385,6 +475,7 @@ def run_comparison(num_coins: int = 200, days: int = 90):
     print(f"Settings: MAX_LONGS={MAX_LONGS}, MAX_SHORTS={MAX_SHORTS}, RISK={RISK_PER_TRADE_PCT}%", flush=True)
     print(f"Filters: OB_STRENGTH>={OB_MIN_STRENGTH}, OB_AGE<={OB_MAX_AGE_CANDLES} candles", flush=True)
     print(f"Using {NUM_WORKERS} parallel workers", flush=True)
+    print(f"Exit precision: {'1MIN CANDLES (accurate)' if USE_1MIN_EXITS else '5min candles'}", flush=True)
     print("NOTE: Look-ahead bias FIXED - results now realistic!", flush=True)
 
     coins = get_top_n_coins(num_coins)
