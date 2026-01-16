@@ -93,57 +93,22 @@ class VariantResult:
     final_equity: float
 
 
-# Winner base config (very_high_strength)
-WINNER_BASE = {
+# Winner config with MTF Alignment (FINAL STRATEGY)
+WINNER_CONFIG = {
     "ob_min_strength": 0.8,
     "ob_max_age": 50,
     "sl_mult": 1.0,
     "tp_mult": 1.5,
-    "use_ob_entry": True
+    "use_ob_entry": True,
+    "use_mtf_alignment": True,  # 1H trend must align
 }
 
-# Define variants to test - NEW FILTER COMPARISON
+# Define variants to test
 VARIANTS = [
-    # Winner (baseline for comparison)
+    # Final strategy: Winner with MTF Alignment
     VariantConfig(
-        "winner", **WINNER_BASE,
-        use_mtf_alignment=False, use_volume_spike=False,
-        use_liquidity_sweep=False, use_fvg_confluence=False
-    ),
-
-    # Winner + MTF Alignment (1H trend must align with 5min)
-    VariantConfig(
-        "winner_mtf", **WINNER_BASE,
-        use_mtf_alignment=True, use_volume_spike=False,
-        use_liquidity_sweep=False, use_fvg_confluence=False
-    ),
-
-    # Winner + Volume Spike (volume > 1.5x average)
-    VariantConfig(
-        "winner_volume", **WINNER_BASE,
-        use_mtf_alignment=False, use_volume_spike=True,
-        use_liquidity_sweep=False, use_fvg_confluence=False
-    ),
-
-    # Winner + Liquidity Sweep (recent sweep in trade direction)
-    VariantConfig(
-        "winner_liq_sweep", **WINNER_BASE,
-        use_mtf_alignment=False, use_volume_spike=False,
-        use_liquidity_sweep=True, use_fvg_confluence=False
-    ),
-
-    # Winner + FVG Confluence (FVG overlaps with OB)
-    VariantConfig(
-        "winner_fvg_ob", **WINNER_BASE,
-        use_mtf_alignment=False, use_volume_spike=False,
-        use_liquidity_sweep=False, use_fvg_confluence=True
-    ),
-
-    # Winner + ALL filters combined
-    VariantConfig(
-        "winner_all_filters", **WINNER_BASE,
-        use_mtf_alignment=True, use_volume_spike=True,
-        use_liquidity_sweep=True, use_fvg_confluence=True
+        "winner_mtf", **WINNER_CONFIG,
+        use_volume_spike=False, use_liquidity_sweep=False, use_fvg_confluence=False
     ),
 ]
 

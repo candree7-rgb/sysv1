@@ -27,6 +27,9 @@ from config.coins import coin_db
 OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.8'))  # very_high_strength config
 OB_MAX_AGE_CANDLES = int(os.getenv('OB_MAX_AGE', '50'))       # very_high_strength config
 
+# MTF Alignment Filter (winner_mtf strategy)
+USE_MTF_ALIGNMENT = os.getenv('USE_MTF_ALIGNMENT', 'true').lower() == 'true'
+
 from data import MTFDataLoader
 from analysis import (
     RegimeDetector, MTFAnalyzer, SessionFilter,
@@ -206,9 +209,27 @@ class SignalGenerator:
             fvgs = self.fvg_detector.detect(mtf_df)
             sweeps = self.liq_detector.find_sweeps(mtf_df)
 
-            # 4b. Filter OBs by quality (same as backtest for 1:1 consistency)
+            # 4b. MTF Alignment Filter (1H trend must align with 5min)
             direction = 'long' if htf_bias.is_bullish else 'short'
             current_price = ltf_df['close'].iloc[-1] if ltf_df is not None else mtf_df['close'].iloc[-1]
+
+            if USE_MTF_ALIGNMENT and htf_df is not None and len(htf_df) > 50:
+                # Calculate 1H EMAs if not present
+                if 'ema20' not in htf_df.columns:
+                    htf_df['ema20'] = htf_df['close'].ewm(span=20).mean()
+                    htf_df['ema50'] = htf_df['close'].ewm(span=50).mean()
+
+                # Get last closed 1H candle
+                h1_candle = htf_df.iloc[-1]
+                h1_close = h1_candle['close']
+                h1_ema20 = h1_candle['ema20']
+                h1_ema50 = h1_candle['ema50']
+
+                # Check 1H trend alignment
+                if direction == 'long' and not (h1_close > h1_ema20 > h1_ema50):
+                    return self._no_signal(symbol, regime.regime.value, 'mtf_not_aligned')
+                if direction == 'short' and not (h1_close < h1_ema20 < h1_ema50):
+                    return self._no_signal(symbol, regime.regime.value, 'mtf_not_aligned')
 
             # Find matching OB with quality filters
             matching_ob = None
