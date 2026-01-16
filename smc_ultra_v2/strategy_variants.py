@@ -52,6 +52,11 @@ class VariantConfig:
     sl_mult: float  # ATR multiplier for SL
     tp_mult: float  # ATR multiplier for TP
     use_ob_entry: bool = True  # True = entry at OB edge, False = entry at close
+    # New filters
+    use_mtf_alignment: bool = False  # Require 1H trend alignment
+    use_volume_spike: bool = False  # Require above-average volume
+    use_liquidity_sweep: bool = False  # Require recent liquidity sweep
+    use_fvg_confluence: bool = False  # Require FVG overlapping with OB
 
 
 @dataclass
@@ -88,16 +93,58 @@ class VariantResult:
     final_equity: float
 
 
-# Define variants to test - FOCUSED COMPARISON
+# Winner base config (very_high_strength)
+WINNER_BASE = {
+    "ob_min_strength": 0.8,
+    "ob_max_age": 50,
+    "sl_mult": 1.0,
+    "tp_mult": 1.5,
+    "use_ob_entry": True
+}
+
+# Define variants to test - NEW FILTER COMPARISON
 VARIANTS = [
-    # Original (NO filters - true original before any changes)
-    VariantConfig("no_filter", 0.0, 9999, 1.0, 1.5, True),
+    # Winner (baseline for comparison)
+    VariantConfig(
+        "winner", **WINNER_BASE,
+        use_mtf_alignment=False, use_volume_spike=False,
+        use_liquidity_sweep=False, use_fvg_confluence=False
+    ),
 
-    # Baseline (first filter I added: strength 0.6, age 100)
-    VariantConfig("baseline", 0.6, 100, 1.0, 1.5, True),
+    # Winner + MTF Alignment (1H trend must align with 5min)
+    VariantConfig(
+        "winner_mtf", **WINNER_BASE,
+        use_mtf_alignment=True, use_volume_spike=False,
+        use_liquidity_sweep=False, use_fvg_confluence=False
+    ),
 
-    # Very High Strength (recommended: strength 0.8, age 50)
-    VariantConfig("very_high_strength", 0.8, 50, 1.0, 1.5, True),
+    # Winner + Volume Spike (volume > 1.5x average)
+    VariantConfig(
+        "winner_volume", **WINNER_BASE,
+        use_mtf_alignment=False, use_volume_spike=True,
+        use_liquidity_sweep=False, use_fvg_confluence=False
+    ),
+
+    # Winner + Liquidity Sweep (recent sweep in trade direction)
+    VariantConfig(
+        "winner_liq_sweep", **WINNER_BASE,
+        use_mtf_alignment=False, use_volume_spike=False,
+        use_liquidity_sweep=True, use_fvg_confluence=False
+    ),
+
+    # Winner + FVG Confluence (FVG overlaps with OB)
+    VariantConfig(
+        "winner_fvg_ob", **WINNER_BASE,
+        use_mtf_alignment=False, use_volume_spike=False,
+        use_liquidity_sweep=False, use_fvg_confluence=True
+    ),
+
+    # Winner + ALL filters combined
+    VariantConfig(
+        "winner_all_filters", **WINNER_BASE,
+        use_mtf_alignment=True, use_volume_spike=True,
+        use_liquidity_sweep=True, use_fvg_confluence=True
+    ),
 ]
 
 
@@ -106,6 +153,7 @@ def process_coin_for_variant(args) -> List[Trade]:
 
     Uses 5min candles for signal generation (OB detection, EMA trend)
     Uses 1min candles for precise SL/TP exit checking
+    Uses 1H candles for MTF alignment filter
     """
     symbol, days, variant = args
 
@@ -118,13 +166,15 @@ def process_coin_for_variant(args) -> List[Trade]:
     os.environ['REQUESTS_CA_BUNDLE'] = ''
 
     from data import BybitDataDownloader
-    from smc import OrderBlockDetector
+    from smc import OrderBlockDetector, FVGDetector, LiquidityDetector
 
     trades = []
 
     try:
         dl = BybitDataDownloader()
         ob_det = OrderBlockDetector()
+        fvg_det = FVGDetector(min_size_pct=0.1)
+        liq_det = LiquidityDetector()
 
         end = datetime.now()
         start = end - timedelta(days=days + 5)
@@ -140,6 +190,16 @@ def process_coin_for_variant(args) -> List[Trade]:
             df_1m = dl.load_or_download(symbol, "1", days + 10)
             if df_1m is None or len(df_1m) < 1000:
                 df_1m = None  # Fall back to 5min exits
+
+        # Load 1H data for MTF alignment (if needed)
+        df_1h = None
+        if variant.use_mtf_alignment:
+            df_1h = dl.load_or_download(symbol, "60", days + 10)
+            if df_1h is not None and len(df_1h) > 50:
+                mask = (df_1h['timestamp'] >= start) & (df_1h['timestamp'] <= end)
+                df_1h = df_1h[mask].reset_index(drop=True)
+                df_1h['ema20'] = df_1h['close'].ewm(span=20).mean()
+                df_1h['ema50'] = df_1h['close'].ewm(span=50).mean()
 
         mask = (df_5m['timestamp'] >= start) & (df_5m['timestamp'] <= end)
         df_5m = df_5m[mask].reset_index(drop=True)
@@ -161,8 +221,25 @@ def process_coin_for_variant(args) -> List[Trade]:
         df_5m['ema20'] = df_5m['close'].ewm(span=20).mean()
         df_5m['ema50'] = df_5m['close'].ewm(span=50).mean()
 
+        # Volume ratio for volume spike filter
+        if 'volume' in df_5m.columns:
+            df_5m['vol_avg'] = df_5m['volume'].rolling(20).mean()
+            df_5m['vol_ratio'] = df_5m['volume'] / df_5m['vol_avg']
+        else:
+            df_5m['vol_ratio'] = 1.0
+
         atr = df_5m['atr']
         obs = ob_det.detect(df_5m, atr)
+
+        # Detect FVGs if needed
+        fvgs = []
+        if variant.use_fvg_confluence:
+            fvgs = fvg_det.detect(df_5m)
+
+        # Detect liquidity sweeps if needed
+        sweeps = []
+        if variant.use_liquidity_sweep:
+            sweeps = liq_det.find_sweeps(df_5m, lookback_bars=20)
 
         active_trade = None
 
@@ -206,7 +283,43 @@ def process_coin_for_variant(args) -> List[Trade]:
                 elif ob.mitigation_timestamp is not None and ob.mitigation_timestamp > ts:
                     active_obs.append(ob)
 
+            # =====================================================
+            # NEW FILTERS (applied before OB check)
+            # =====================================================
+
+            # Filter: MTF Alignment (1H trend must match 5min trend)
+            if variant.use_mtf_alignment and df_1h is not None:
+                # Find the 1H candle that contains this 5min timestamp
+                h1_match = df_1h[df_1h['timestamp'] <= ts].tail(1)
+                if len(h1_match) > 0:
+                    h1_candle = h1_match.iloc[0]
+                    h1_ema20 = h1_candle.get('ema20', 0)
+                    h1_ema50 = h1_candle.get('ema50', 0)
+                    h1_close = h1_candle['close']
+
+                    # Check 1H trend alignment
+                    if trend == 'long' and not (h1_close > h1_ema20 > h1_ema50):
+                        continue  # 1H not bullish, skip
+                    if trend == 'short' and not (h1_close < h1_ema20 < h1_ema50):
+                        continue  # 1H not bearish, skip
+
+            # Filter: Volume Spike (volume > 1.5x average)
+            if variant.use_volume_spike:
+                vol_ratio = candle.get('vol_ratio', 1.0)
+                if vol_ratio < 1.5:
+                    continue  # Volume not high enough
+
+            # Filter: Recent Liquidity Sweep
+            if variant.use_liquidity_sweep:
+                recent_sweep = liq_det.has_recent_sweep(sweeps, ts, lookback_bars=10)
+                if trend == 'long' and not recent_sweep.get('bullish_sweep', False):
+                    continue  # No recent bullish sweep
+                if trend == 'short' and not recent_sweep.get('bearish_sweep', False):
+                    continue  # No recent bearish sweep
+
+            # =====================================================
             # Check for OB entry with variant-specific filters
+            # =====================================================
             matching_ob = None
             for ob in active_obs:
                 if (trend == 'long' and ob.is_bullish) or (trend == 'short' and not ob.is_bullish):
@@ -228,6 +341,25 @@ def process_coin_for_variant(args) -> List[Trade]:
                         ob_age_candles = ob_age_minutes / 5
                         if ob_age_candles > variant.ob_max_age:
                             continue
+
+                        # Filter: FVG + OB Confluence
+                        if variant.use_fvg_confluence:
+                            has_fvg_overlap = False
+                            for fvg in fvgs:
+                                if fvg.is_filled:
+                                    continue
+                                if fvg.timestamp >= ts:
+                                    continue
+                                # Check if FVG overlaps with OB
+                                if fvg.is_bullish == ob.is_bullish:
+                                    # Check zone overlap
+                                    overlap_top = min(ob.top, fvg.top)
+                                    overlap_bottom = max(ob.bottom, fvg.bottom)
+                                    if overlap_top > overlap_bottom:
+                                        has_fvg_overlap = True
+                                        break
+                            if not has_fvg_overlap:
+                                continue  # No FVG confluence
 
                         matching_ob = ob
                         break
@@ -506,8 +638,18 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
 
     for variant in variants:
         print(f"\n>>> Testing variant: {variant.name}")
+        filters_str = []
+        if variant.use_mtf_alignment:
+            filters_str.append("MTF")
+        if variant.use_volume_spike:
+            filters_str.append("VOL")
+        if variant.use_liquidity_sweep:
+            filters_str.append("LIQ")
+        if variant.use_fvg_confluence:
+            filters_str.append("FVG")
+        filters_display = "+".join(filters_str) if filters_str else "none"
         print(f"    Strength>={variant.ob_min_strength}, Age<={variant.ob_max_age}, "
-              f"SL={variant.sl_mult}x, TP={variant.tp_mult}x, OB_Entry={variant.use_ob_entry}")
+              f"Filters=[{filters_display}]")
 
         # Prepare args for parallel processing
         args = [(coin, days, variant) for coin in coins]
@@ -551,9 +693,20 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
 
     # Print best variant
     best = sorted_results[0]
+    filters_str = []
+    if best.config.use_mtf_alignment:
+        filters_str.append("MTF_Alignment")
+    if best.config.use_volume_spike:
+        filters_str.append("Volume_Spike")
+    if best.config.use_liquidity_sweep:
+        filters_str.append("Liquidity_Sweep")
+    if best.config.use_fvg_confluence:
+        filters_str.append("FVG_OB_Confluence")
+    filters_display = ", ".join(filters_str) if filters_str else "Base OB filters only"
+
     print(f"\n🏆 BEST VARIANT: {best.name}")
-    print(f"   Config: Strength>={best.config.ob_min_strength}, Age<={best.config.ob_max_age}, "
-          f"SL={best.config.sl_mult}x, TP={best.config.tp_mult}x")
+    print(f"   Config: Strength>={best.config.ob_min_strength}, Age<={best.config.ob_max_age}")
+    print(f"   Filters: {filters_display}")
     print(f"   Win Rate: {best.win_rate:.1f}%")
     print(f"   Profit Factor: {best.profit_factor:.2f}")
     print(f"   Total PnL: {best.total_pnl:+.1f}%")
