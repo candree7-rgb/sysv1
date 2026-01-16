@@ -450,12 +450,19 @@ def check_trade_exit_1min(trade: Trade, df_1m: pd.DataFrame, current_5m_ts: date
 
     Iterates through 1min candles from trade entry to current 5min candle.
     This gives us exact order of SL vs TP hits.
+
+    IMPORTANT: We start checking 1 candle AFTER entry to be conservative.
+    This accounts for the fact that the limit order fills somewhere within
+    the entry 5min candle, not at its start.
     """
     fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)
     fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)
 
     # Get 1min candles from entry time to current 5min candle
-    mask = (df_1m['timestamp'] > trade.entry_time) & (df_1m['timestamp'] <= current_5m_ts)
+    # Use >= entry_time + 5min to ensure we only check AFTER the entry candle
+    # This is conservative: assumes fill happens at END of entry candle
+    entry_candle_end = trade.entry_time + pd.Timedelta(minutes=5)
+    mask = (df_1m['timestamp'] >= entry_candle_end) & (df_1m['timestamp'] <= current_5m_ts)
     candles_to_check = df_1m[mask]
 
     if len(candles_to_check) == 0:
