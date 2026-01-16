@@ -88,33 +88,16 @@ class VariantResult:
     final_equity: float
 
 
-# Define variants to test
+# Define variants to test - FOCUSED COMPARISON
 VARIANTS = [
-    # Baseline (current)
-    VariantConfig("baseline", 0.6, 100, 1.0, 1.5, False),
+    # Original (NO filters - true original before any changes)
+    VariantConfig("no_filter", 0.0, 9999, 1.0, 1.5, True),
 
-    # Entry at OB edge (more realistic)
-    VariantConfig("ob_entry", 0.6, 100, 1.0, 1.5, True),
+    # Baseline (first filter I added: strength 0.6, age 100)
+    VariantConfig("baseline", 0.6, 100, 1.0, 1.5, True),
 
-    # Stricter strength filter
-    VariantConfig("high_strength", 0.7, 100, 1.0, 1.5, True),
+    # Very High Strength (recommended: strength 0.8, age 50)
     VariantConfig("very_high_strength", 0.8, 50, 1.0, 1.5, True),
-
-    # Fresher OBs only
-    VariantConfig("fresh_ob", 0.6, 50, 1.0, 1.5, True),
-    VariantConfig("very_fresh_ob", 0.6, 30, 1.0, 1.5, True),
-
-    # Different RR ratios
-    VariantConfig("rr_1_2", 0.6, 100, 1.0, 2.0, True),
-    VariantConfig("rr_1_2.5", 0.6, 100, 1.0, 2.5, True),
-    VariantConfig("tight_sl", 0.6, 100, 0.7, 1.5, True),
-
-    # Combined strict filters
-    VariantConfig("strict_all", 0.75, 40, 1.0, 1.5, True),
-    VariantConfig("ultra_strict", 0.8, 30, 0.8, 2.0, True),
-
-    # Relaxed filters (more trades)
-    VariantConfig("relaxed", 0.5, 150, 1.0, 1.5, True),
 ]
 
 
