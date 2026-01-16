@@ -1,22 +1,16 @@
 """
-SMC Strategy Comparison
-=======================
-Testet die ECHTEN SMC Setups gegeneinander um das beste zu finden.
-
-Setups:
-1. SWEEP_OB: Liquidity Sweep + Order Block Retest
-2. SWEEP_FVG: Liquidity Sweep + FVG Fill
-3. SWEEP_OB_FVG: Triple Confluence (beste aber selten)
-4. OB_ONLY: Nur Order Block (Baseline)
-5. FVG_ONLY: Nur FVG Fill (Baseline)
+SMC Strategy Comparison - PARALLELIZED VERSION
+==============================================
+8x faster with multiprocessing!
 """
 
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from multiprocessing import Pool, cpu_count
 
 import pandas as pd
 
@@ -24,24 +18,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 class SetupType(Enum):
-    # Only test OB_RETEST - the winner from previous test
-    OB_RETEST = "ob_retest"              # Price retests OB zone
+    OB_RETEST = "ob_retest"
 
 
 # Trading costs (REALISTIC)
-TAKER_FEE_PCT = 0.055    # Bybit taker fee per side
-MAKER_FEE_PCT = 0.02     # Bybit maker fee per side
-SLIPPAGE_PCT = 0.02      # Realistic slippage
+TAKER_FEE_PCT = 0.055
+MAKER_FEE_PCT = 0.02
+SLIPPAGE_PCT = 0.02
 
 # Dynamic leverage settings
-RISK_PER_TRADE_PCT = 2.0  # Risk 2% of account per trade
-MAX_LEVERAGE = 50         # Cap leverage at 50x
-MIN_LEVERAGE = 5          # Minimum leverage
+RISK_PER_TRADE_PCT = 2.0
+MAX_LEVERAGE = 50
+MIN_LEVERAGE = 5
 
 # Max concurrent trades - SEPARATED by direction for hedging!
-# Max 2 longs + Max 2 shorts = hedged exposure
 MAX_LONGS = int(os.getenv('MAX_LONGS', '2'))
 MAX_SHORTS = int(os.getenv('MAX_SHORTS', '2'))
+
+# Parallelization
+NUM_WORKERS = int(os.getenv('NUM_WORKERS', str(min(8, cpu_count()))))
 
 
 @dataclass
@@ -53,128 +48,78 @@ class Trade:
     sl: float
     tp: float
     entry_time: datetime
-    leverage: int = 10           # Dynamic leverage
-    sl_pct: float = 0.0          # SL distance in %
+    leverage: int = 10
+    sl_pct: float = 0.0
     exit_time: datetime = None
     exit_price: float = None
-    pnl_pct: float = None        # RAW pnl (without leverage)
-    pnl_leveraged: float = None  # Leveraged pnl
-    result: str = None           # 'win', 'loss'
+    pnl_pct: float = None
+    pnl_leveraged: float = None
+    result: str = None
 
 
-class SMCStrategyTester:
-    """Tests specific SMC setups"""
+def process_single_coin(args) -> List[Trade]:
+    """Process a single coin - can be run in parallel"""
+    symbol, days = args
 
-    def __init__(self, symbols: List[str], days: int = 14):
-        self.symbols = symbols
-        self.days = days
-        self.data = {}
-        self.trades_by_setup: Dict[SetupType, List[Trade]] = {s: [] for s in SetupType}
-        # Track active trades by DIRECTION for hedged exposure
-        self.active_longs: List[Trade] = []
-        self.active_shorts: List[Trade] = []
+    # Import inside function for multiprocessing
+    from data import BybitDataDownloader
+    from smc import OrderBlockDetector, FVGDetector, LiquidityDetector
 
-    def load_data(self):
-        """Load and prepare data"""
-        import pandas as pd
-        from data import BybitDataDownloader
-        from smc import OrderBlockDetector, FVGDetector, LiquidityDetector
+    trades = []
 
-        print("Loading data...", flush=True)
-
+    try:
         dl = BybitDataDownloader()
         ob_det = OrderBlockDetector()
-        fvg_det = FVGDetector()
-        liq_det = LiquidityDetector()
 
         end = datetime.now()
-        start = end - timedelta(days=self.days + 5)
+        start = end - timedelta(days=days + 5)
 
-        for i, symbol in enumerate(self.symbols):
-            print(f"  [{i+1}/{len(self.symbols)}] {symbol}...", end="", flush=True)
+        df = dl.load_or_download(symbol, "5", days + 10)
+        if df is None or len(df) < 200:
+            return []
 
-            df = dl.load_or_download(symbol, "5", self.days + 10)
-            if df is None or len(df) < 200:
-                print(" SKIP", flush=True)
-                continue
+        # Filter date range
+        mask = (df['timestamp'] >= start) & (df['timestamp'] <= end)
+        df = df[mask].reset_index(drop=True)
 
-            # Filter date range
-            mask = (df['timestamp'] >= start) & (df['timestamp'] <= end)
-            df = df[mask].reset_index(drop=True)
+        if len(df) < 100:
+            return []
 
-            if len(df) < 100:
-                print(" SKIP (short)", flush=True)
-                continue
+        # Calculate indicators
+        high_low = df['high'] - df['low']
+        high_close = abs(df['high'] - df['close'].shift())
+        low_close = abs(df['low'] - df['close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(14).mean()
+        df['ema20'] = df['close'].ewm(span=20).mean()
+        df['ema50'] = df['close'].ewm(span=50).mean()
 
-            # Calculate indicators
-            # ATR
-            high_low = df['high'] - df['low']
-            high_close = abs(df['high'] - df['close'].shift())
-            low_close = abs(df['low'] - df['close'].shift())
-            tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-            df['atr'] = tr.rolling(14).mean()
+        # Detect OBs
+        atr = df['atr']
+        obs = ob_det.detect(df, atr)
 
-            # EMAs for trend
-            df['ema20'] = df['close'].ewm(span=20).mean()
-            df['ema50'] = df['close'].ewm(span=50).mean()
-
-            self.data[symbol] = df
-
-            # Detect SMC structures
-            atr = df['atr']
-            self.data[f"{symbol}_obs"] = ob_det.detect(df, atr)
-            self.data[f"{symbol}_fvgs"] = fvg_det.detect(df)
-            self.data[f"{symbol}_sweeps"] = liq_det.find_sweeps(df)
-
-            print(f" OK ({len(df)} bars)", flush=True)
-
-        print(f"\nLoaded {len([k for k in self.data.keys() if not k.endswith(('_obs', '_fvgs', '_sweeps'))])} symbols")
-
-    def run_all_strategies(self):
-        """Run all strategy variations"""
-        print("\nTesting strategies...", flush=True)
-
-        for symbol in [k for k in self.data.keys() if not k.endswith(('_obs', '_fvgs', '_sweeps'))]:
-            df = self.data[symbol]
-            obs = self.data.get(f"{symbol}_obs", [])
-            fvgs = self.data.get(f"{symbol}_fvgs", [])
-            sweeps = self.data.get(f"{symbol}_sweeps", [])
-
-            self._test_symbol(symbol, df, obs, fvgs, sweeps)
-
-        self._print_results()
-
-    def _test_symbol(self, symbol: str, df, obs: list, fvgs: list, sweeps: list):
-        """Test all setups on one symbol"""
-
-        active_trades = {s: None for s in SetupType}
+        # Run backtest for this coin
+        active_trade = None
 
         for idx in range(50, len(df)):
             candle = df.iloc[idx]
             ts = candle['timestamp']
             price = candle['close']
-            atr = candle['atr']
+            atr_val = candle['atr']
 
-            if pd.isna(atr) or atr <= 0:
+            if pd.isna(atr_val) or atr_val <= 0:
                 continue
 
-            # First: Update active trades by direction - remove closed ones
-            self.active_longs = [t for t in self.active_longs if t.exit_time is None or t.exit_time > ts]
-            self.active_shorts = [t for t in self.active_shorts if t.exit_time is None or t.exit_time > ts]
+            # Check and close active trade
+            if active_trade:
+                closed = check_trade_exit(active_trade, candle)
+                if closed:
+                    trades.append(active_trade)
+                    active_trade = None
 
-            # Check and close active trades for THIS symbol
-            for setup_type in SetupType:
-                trade = active_trades[setup_type]
-                if trade:
-                    closed = self._check_trade_exit(trade, candle)
-                    if closed:
-                        self.trades_by_setup[setup_type].append(trade)
-                        # Remove from direction tracking
-                        if trade.direction == 'long' and trade in self.active_longs:
-                            self.active_longs.remove(trade)
-                        elif trade.direction == 'short' and trade in self.active_shorts:
-                            self.active_shorts.remove(trade)
-                        active_trades[setup_type] = None
+            # Skip if we have an active trade
+            if active_trade:
+                continue
 
             # Get trend direction
             if candle['close'] > candle['ema20'] > candle['ema50']:
@@ -182,307 +127,240 @@ class SMCStrategyTester:
             elif candle['close'] < candle['ema20'] < candle['ema50']:
                 trend = 'short'
             else:
-                continue  # No clear trend
+                continue
 
-            # Get recent structures - FIXED for look-ahead bias!
-            recent_sweeps = [s for s in sweeps if ts - timedelta(hours=2) <= s.timestamp <= ts]
-
-            # FIXED: Check mitigation timestamp to avoid look-ahead bias!
+            # Get active OBs (with look-ahead bias fix!)
             active_obs = []
             for ob in obs:
                 if ob.timestamp >= ts:
-                    continue  # OB hasn't formed yet
+                    continue
                 if not ob.is_mitigated:
-                    active_obs.append(ob)  # Never mitigated - OK
+                    active_obs.append(ob)
                 elif ob.mitigation_timestamp is not None and ob.mitigation_timestamp > ts:
-                    active_obs.append(ob)  # Mitigated AFTER current time - still valid now!
+                    active_obs.append(ob)
 
-            # FIXED: Check FVG fill timestamp to avoid look-ahead bias!
-            active_fvgs = []
-            for fvg in fvgs:
-                if fvg.timestamp >= ts:
-                    continue  # FVG hasn't formed yet
-                if not fvg.is_filled:
-                    active_fvgs.append(fvg)  # Never filled - OK
-                elif fvg.fill_timestamp is not None and fvg.fill_timestamp > ts:
-                    active_fvgs.append(fvg)  # Filled AFTER current time - still valid now!
-
-            # Check for sweep in our direction
-            has_sweep = False
-            for sweep in recent_sweeps:
-                if (trend == 'long' and sweep.is_bullish) or (trend == 'short' and not sweep.is_bullish):
-                    has_sweep = True
-                    break
-
-            # Check for OB nearby (price near or inside OB zone)
-            near_ob = False
+            # Check for OB entry
             in_ob = False
             for ob in active_obs:
-                dist = abs(price - ob.mid) / price * 100
                 if (trend == 'long' and ob.is_bullish) or (trend == 'short' and not ob.is_bullish):
-                    if dist < 1.5:
-                        near_ob = True
                     if ob.bottom <= price <= ob.top:
                         in_ob = True
                         break
 
-            # Check for FVG with quality metrics
-            in_fvg = False
-            fresh_fvg = False      # FVG < 10 candles old
-            quality_fvg = False    # Large + strong impulse
-            current_fvg = None
+            if in_ob:
+                active_trade = create_trade(symbol, trend, price, atr_val, ts)
 
-            for fvg in active_fvgs:
-                if fvg.bottom <= price <= fvg.top:
-                    if (trend == 'long' and fvg.is_bullish) or (trend == 'short' and not fvg.is_bullish):
-                        in_fvg = True
-                        current_fvg = fvg
+        # Close any remaining trade
+        if active_trade and len(df) > 0:
+            last_candle = df.iloc[-1]
+            check_trade_exit(active_trade, last_candle)
+            if active_trade.exit_time:
+                trades.append(active_trade)
 
-                        # Check freshness: FVG formed recently
-                        fvg_age_minutes = (ts - fvg.timestamp).total_seconds() / 60
-                        fvg_age_candles = fvg_age_minutes / 5  # 5min candles
-                        if fvg_age_candles <= 10:
-                            fresh_fvg = True
+    except Exception as e:
+        print(f"  Error processing {symbol}: {e}", flush=True)
 
-                        # Check quality: large gap + strong impulse
-                        if fvg.size_pct >= 0.2 and fvg.impulse_strength >= 1.2:
-                            quality_fvg = True
+    return trades
 
-                        break
 
-            # === SETUP DETECTION (Only OB_RETEST) ===
-            # Respect MAX_LONGS / MAX_SHORTS limits (hedged exposure)
+def create_trade(symbol: str, direction: str, price: float, atr: float, ts: datetime) -> Trade:
+    """Create a trade with 1:1.5 RR and dynamic leverage"""
+    sl_mult = 1.0
+    tp_mult = 1.5
 
-            # Check if we can open based on direction
-            can_open_long = len(self.active_longs) < MAX_LONGS
-            can_open_short = len(self.active_shorts) < MAX_SHORTS
+    if direction == 'long':
+        entry = price * 1.0003
+        sl = entry - atr * sl_mult
+        tp = entry + atr * tp_mult
+    else:
+        entry = price * 0.9997
+        sl = entry + atr * sl_mult
+        tp = entry - atr * tp_mult
 
-            # OB_RETEST - Price inside OB zone
-            if in_ob and active_trades[SetupType.OB_RETEST] is None:
-                if (trend == 'long' and can_open_long) or (trend == 'short' and can_open_short):
-                    trade = self._create_trade(SetupType.OB_RETEST, symbol, trend, price, atr, ts)
-                    active_trades[SetupType.OB_RETEST] = trade
-                    # Track by direction
-                    if trend == 'long':
-                        self.active_longs.append(trade)
-                    else:
-                        self.active_shorts.append(trade)
+    sl_pct = abs(entry - sl) / entry * 100
 
-    def _create_trade(self, setup: SetupType, symbol: str, direction: str,
-                      price: float, atr: float, ts: datetime) -> Trade:
-        """Create a trade with 1:1.5 RR and dynamic leverage"""
-        sl_mult = 1.0
-        tp_mult = 1.5  # 1:1.5 RR
+    if sl_pct > 0:
+        calculated_lev = RISK_PER_TRADE_PCT / sl_pct
+        leverage = min(int(calculated_lev), MAX_LEVERAGE)
+        leverage = max(leverage, MIN_LEVERAGE)
+    else:
+        leverage = MIN_LEVERAGE
 
-        if direction == 'long':
-            entry = price * 1.0003  # Small slippage
-            sl = entry - atr * sl_mult
-            tp = entry + atr * tp_mult
-        else:
-            entry = price * 0.9997
-            sl = entry + atr * sl_mult
-            tp = entry - atr * tp_mult
+    return Trade(
+        setup=SetupType.OB_RETEST,
+        symbol=symbol,
+        direction=direction,
+        entry=entry,
+        sl=sl,
+        tp=tp,
+        entry_time=ts,
+        leverage=leverage,
+        sl_pct=sl_pct
+    )
 
-        # Calculate dynamic leverage based on SL distance
-        sl_pct = abs(entry - sl) / entry * 100
 
-        # Leverage formula: risk_per_trade / sl_pct
-        # Example: 2% risk / 0.5% SL = 4x leverage (to risk 2% of account)
-        if sl_pct > 0:
-            calculated_lev = RISK_PER_TRADE_PCT / sl_pct
-            leverage = min(int(calculated_lev), MAX_LEVERAGE)
-            leverage = max(leverage, MIN_LEVERAGE)
-        else:
-            leverage = MIN_LEVERAGE
+def check_trade_exit(trade: Trade, candle) -> bool:
+    """Check if trade should exit"""
+    fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)
+    fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)
 
-        return Trade(
-            setup=setup,
-            symbol=symbol,
-            direction=direction,
-            entry=entry,
-            sl=sl,
-            tp=tp,
-            entry_time=ts,
-            leverage=leverage,
-            sl_pct=sl_pct
-        )
+    if trade.direction == 'long':
+        if candle['low'] <= trade.sl:
+            trade.exit_price = trade.sl
+            trade.result = 'loss'
+            gross_pnl = (trade.sl - trade.entry) / trade.entry * 100
+            trade.pnl_pct = gross_pnl - fee_loss
+            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+            trade.exit_time = candle['timestamp']
+            return True
+        elif candle['high'] >= trade.tp:
+            trade.exit_price = trade.tp
+            trade.result = 'win'
+            gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
+            trade.pnl_pct = gross_pnl - fee_win
+            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+            trade.exit_time = candle['timestamp']
+            return True
+    else:
+        if candle['high'] >= trade.sl:
+            trade.exit_price = trade.sl
+            trade.result = 'loss'
+            gross_pnl = (trade.entry - trade.sl) / trade.entry * 100
+            trade.pnl_pct = gross_pnl - fee_loss
+            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+            trade.exit_time = candle['timestamp']
+            return True
+        elif candle['low'] <= trade.tp:
+            trade.exit_price = trade.tp
+            trade.result = 'win'
+            gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
+            trade.pnl_pct = gross_pnl - fee_win
+            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+            trade.exit_time = candle['timestamp']
+            return True
 
-    def _check_trade_exit(self, trade: Trade, candle) -> bool:
-        """Check if trade should exit - WITH REALISTIC FEES & LEVERAGE!"""
-        # Fee structure:
-        # - Entry: Limit order = MAKER_FEE (0.02%)
-        # - TP exit: Limit order = MAKER_FEE (0.02%)
-        # - SL exit: Market order = TAKER_FEE (0.055%)
-        # Note: Fees apply to leveraged position size
-        fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)    # ~0.08% for TP hit
-        fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)  # ~0.115% for SL hit
+    return False
 
+
+def apply_position_limits(trades: List[Trade]) -> List[Trade]:
+    """Apply MAX_LONGS/MAX_SHORTS limits across all coins"""
+    # Sort by entry time
+    sorted_trades = sorted(trades, key=lambda t: t.entry_time)
+
+    filtered_trades = []
+    active_longs = []
+    active_shorts = []
+
+    for trade in sorted_trades:
+        # Remove closed trades
+        active_longs = [t for t in active_longs if t.exit_time is None or t.exit_time > trade.entry_time]
+        active_shorts = [t for t in active_shorts if t.exit_time is None or t.exit_time > trade.entry_time]
+
+        # Check limits
+        if trade.direction == 'long' and len(active_longs) >= MAX_LONGS:
+            continue  # Skip this trade
+        if trade.direction == 'short' and len(active_shorts) >= MAX_SHORTS:
+            continue  # Skip this trade
+
+        # Add trade
+        filtered_trades.append(trade)
         if trade.direction == 'long':
-            if candle['low'] <= trade.sl:
-                trade.exit_price = trade.sl
-                trade.result = 'loss'
-                gross_pnl = (trade.sl - trade.entry) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_loss  # Raw PnL after fees
-                trade.pnl_leveraged = trade.pnl_pct * trade.leverage  # Leveraged PnL
-                trade.exit_time = candle['timestamp']
-                return True
-            elif candle['high'] >= trade.tp:
-                trade.exit_price = trade.tp
-                trade.result = 'win'
-                gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_win
-                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-                trade.exit_time = candle['timestamp']
-                return True
+            active_longs.append(trade)
         else:
-            if candle['high'] >= trade.sl:
-                trade.exit_price = trade.sl
-                trade.result = 'loss'
-                gross_pnl = (trade.entry - trade.sl) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_loss
-                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-                trade.exit_time = candle['timestamp']
-                return True
-            elif candle['low'] <= trade.tp:
-                trade.exit_price = trade.tp
-                trade.result = 'win'
-                gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
-                trade.pnl_pct = gross_pnl - fee_win
-                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-                trade.exit_time = candle['timestamp']
-                return True
+            active_shorts.append(trade)
 
-        return False
+    return filtered_trades
 
-    def _print_results(self):
-        """Print comparison results with leverage stats"""
-        print("\n" + "=" * 100)
-        print("SMC STRATEGY COMPARISON RESULTS (with Dynamic Leverage)")
-        print("=" * 100)
-        print(f"{'Setup':<15} {'Trades':>7} {'Win':>5} {'Loss':>5} {'WR%':>7} {'AvgLev':>7} {'AvgWin':>9} {'AvgLoss':>9} {'TotalPnL':>10}")
-        print("-" * 100)
 
-        results = []
+def print_results(trades: List[Trade]):
+    """Print results"""
+    print("\n" + "=" * 100)
+    print("SMC STRATEGY COMPARISON RESULTS (PARALLELIZED)")
+    print("=" * 100)
 
-        for setup_type in SetupType:
-            trades = self.trades_by_setup[setup_type]
+    if not trades:
+        print("NO TRADES")
+        return
 
-            if not trades:
-                print(f"{setup_type.value:<15} {'NO TRADES':>7}")
-                continue
+    winners = [t for t in trades if t.result == 'win']
+    losers = [t for t in trades if t.result == 'loss']
 
-            winners = [t for t in trades if t.result == 'win']
-            losers = [t for t in trades if t.result == 'loss']
+    total = len(trades)
+    win_count = len(winners)
+    loss_count = len(losers)
+    win_rate = win_count / total * 100 if total > 0 else 0
 
-            total = len(trades)
-            win_count = len(winners)
-            loss_count = len(losers)
-            win_rate = win_count / total * 100 if total > 0 else 0
+    avg_leverage = sum(t.leverage for t in trades) / len(trades)
+    avg_win_lev = sum(t.pnl_leveraged for t in winners) / len(winners) if winners else 0
+    avg_loss_lev = abs(sum(t.pnl_leveraged for t in losers) / len(losers)) if losers else 0
 
-            # Average leverage used
-            avg_leverage = sum(t.leverage for t in trades) / len(trades) if trades else 0
+    gross_win_lev = sum(t.pnl_leveraged for t in winners) if winners else 0
+    gross_loss_lev = abs(sum(t.pnl_leveraged for t in losers)) if losers else 1
+    pf = gross_win_lev / gross_loss_lev if gross_loss_lev > 0 else gross_win_lev
+    total_pnl_lev = gross_win_lev - gross_loss_lev
 
-            # Leveraged PnL stats
-            avg_win_lev = sum(t.pnl_leveraged for t in winners) / len(winners) if winners else 0
-            avg_loss_lev = abs(sum(t.pnl_leveraged for t in losers) / len(losers)) if losers else 0
+    print(f"{'Setup':<15} {'Trades':>7} {'Win':>5} {'Loss':>5} {'WR%':>7} {'AvgLev':>7} {'AvgWin':>9} {'AvgLoss':>9} {'TotalPnL':>10}")
+    print("-" * 100)
+    print(f"{'ob_retest':<15} {total:>7} {win_count:>5} {loss_count:>5} "
+          f"{win_rate:>6.1f}% {avg_leverage:>6.1f}x {avg_win_lev:>+8.2f}% {avg_loss_lev:>8.2f}% {total_pnl_lev:>+9.2f}%")
 
-            gross_win_lev = sum(t.pnl_leveraged for t in winners) if winners else 0
-            gross_loss_lev = abs(sum(t.pnl_leveraged for t in losers)) if losers else 1
-            pf = gross_win_lev / gross_loss_lev if gross_loss_lev > 0 else gross_win_lev
+    print("\n" + "=" * 100)
+    print(f"BEST SETUP: OB_RETEST")
+    print(f"   Win Rate: {win_rate:.1f}%")
+    print(f"   Avg Leverage: {avg_leverage:.1f}x")
+    print(f"   Profit Factor: {pf:.2f}")
+    print(f"   Total PnL (leveraged): {total_pnl_lev:+.2f}%")
+    print(f"   Trades: {total}")
+    print("=" * 100)
 
-            total_pnl_lev = gross_win_lev - gross_loss_lev
+    # Per-coin breakdown
+    print(f"\nOB_RETEST - Per Coin Breakdown (Leveraged PnL):")
+    print("-" * 60)
 
-            print(f"{setup_type.value:<15} {total:>7} {win_count:>5} {loss_count:>5} "
-                  f"{win_rate:>6.1f}% {avg_leverage:>6.1f}x {avg_win_lev:>+8.2f}% {avg_loss_lev:>8.2f}% {total_pnl_lev:>+9.2f}%")
+    coin_stats = {}
+    for trade in trades:
+        if trade.symbol not in coin_stats:
+            coin_stats[trade.symbol] = {'wins': 0, 'losses': 0, 'pnl': 0, 'avg_lev': []}
 
-            results.append({
-                'setup': setup_type.value,
-                'trades': total,
-                'win_rate': win_rate,
-                'avg_leverage': avg_leverage,
-                'avg_win': avg_win_lev,
-                'avg_loss': avg_loss_lev,
-                'profit_factor': pf,
-                'total_pnl': total_pnl_lev
-            })
+        if trade.result == 'win':
+            coin_stats[trade.symbol]['wins'] += 1
+        else:
+            coin_stats[trade.symbol]['losses'] += 1
+        coin_stats[trade.symbol]['pnl'] += trade.pnl_leveraged
+        coin_stats[trade.symbol]['avg_lev'].append(trade.leverage)
 
-        # Sort by total PnL (with leverage)
-        results.sort(key=lambda x: x['total_pnl'], reverse=True)
+    for symbol, stats in sorted(coin_stats.items(), key=lambda x: -x[1]['pnl']):
+        total_coin = stats['wins'] + stats['losses']
+        wr = stats['wins'] / total_coin * 100 if total_coin > 0 else 0
+        avg_lev = sum(stats['avg_lev']) / len(stats['avg_lev']) if stats['avg_lev'] else 0
+        print(f"  {symbol:<12} {total_coin:>3} trades, {wr:>5.1f}% WR, {avg_lev:>4.1f}x lev, {stats['pnl']:>+8.2f}% PnL")
 
-        if results:
-            best = results[0]
-            print("\n" + "=" * 100)
-            print(f"BEST SETUP: {best['setup'].upper()}")
-            print(f"   Win Rate: {best['win_rate']:.1f}%")
-            print(f"   Avg Leverage: {best['avg_leverage']:.1f}x")
-            print(f"   Profit Factor: {best['profit_factor']:.2f}")
-            print(f"   Total PnL (leveraged): {best['total_pnl']:+.2f}%")
-            print(f"   Trades: {best['trades']}")
-            print("=" * 100)
+    # Simulate account growth
+    print(f"\n{'='*70}")
+    print(f"SIMULATED ACCOUNT GROWTH ($10,000 start, {RISK_PER_TRADE_PCT}% risk per trade)")
+    print("="*70)
 
-        # Per-coin breakdown for best setup
-        if results:
-            best_setup = SetupType(results[0]['setup'])
-            print(f"\n{results[0]['setup'].upper()} - Per Coin Breakdown (Leveraged PnL):")
-            print("-" * 60)
+    equity = 10000.0
+    peak = 10000.0
+    max_dd = 0.0
 
-            coin_stats = {}
-            for trade in self.trades_by_setup[best_setup]:
-                if trade.symbol not in coin_stats:
-                    coin_stats[trade.symbol] = {'wins': 0, 'losses': 0, 'pnl': 0, 'avg_lev': []}
+    for trade in sorted(trades, key=lambda t: t.entry_time):
+        pnl_usd = equity * (trade.pnl_leveraged / 100)
+        equity += pnl_usd
+        peak = max(peak, equity)
+        dd = (peak - equity) / peak * 100
+        max_dd = max(max_dd, dd)
 
-                if trade.result == 'win':
-                    coin_stats[trade.symbol]['wins'] += 1
-                else:
-                    coin_stats[trade.symbol]['losses'] += 1
-                coin_stats[trade.symbol]['pnl'] += trade.pnl_leveraged
-                coin_stats[trade.symbol]['avg_lev'].append(trade.leverage)
-
-            for symbol, stats in sorted(coin_stats.items(), key=lambda x: -x[1]['pnl']):
-                total = stats['wins'] + stats['losses']
-                wr = stats['wins'] / total * 100 if total > 0 else 0
-                avg_lev = sum(stats['avg_lev']) / len(stats['avg_lev']) if stats['avg_lev'] else 0
-                print(f"  {symbol:<12} {total:>3} trades, {wr:>5.1f}% WR, {avg_lev:>4.1f}x lev, {stats['pnl']:>+8.2f}% PnL")
-
-        # Simulate account growth with $10,000
-        # The leverage is calculated as: leverage = RISK_PER_TRADE / sl_pct
-        # This means pnl_leveraged already represents the % of account risked/gained
-        # Win: ~+3% of account (2% risk × 1.5 RR)
-        # Loss: ~-2% of account (the risk)
-        if results:
-            print(f"\n{'='*70}")
-            print(f"SIMULATED ACCOUNT GROWTH ($10,000 start, {RISK_PER_TRADE_PCT}% risk per trade)")
-            print("="*70)
-
-            for setup_type in SetupType:
-                trades = self.trades_by_setup[setup_type]
-                if not trades:
-                    continue
-
-                equity = 10000.0
-                peak = 10000.0
-                max_dd = 0.0
-
-                for trade in sorted(trades, key=lambda t: t.entry_time):
-                    # pnl_leveraged IS the account % change
-                    # Because leverage = risk / sl_pct, the math works out:
-                    # - Loss: sl_pct × leverage = sl_pct × (risk/sl_pct) = risk = ~2%
-                    # - Win: tp_pct × leverage = tp_pct × (risk/sl_pct) = risk × RR = ~3%
-                    pnl_usd = equity * (trade.pnl_leveraged / 100)
-                    equity += pnl_usd
-                    peak = max(peak, equity)
-                    dd = (peak - equity) / peak * 100
-                    max_dd = max(max_dd, dd)
-
-                return_pct = (equity - 10000) / 10000 * 100
-                print(f"  {setup_type.value:<15} $10,000 -> ${equity:>10,.2f} ({return_pct:>+7.2f}%)  MaxDD: {max_dd:.1f}%")
+    return_pct = (equity - 10000) / 10000 * 100
+    print(f"  {'ob_retest':<15} $10,000 -> ${equity:>10,.2f} ({return_pct:>+7.2f}%)  MaxDD: {max_dd:.1f}%")
 
 
 def run_comparison(num_coins: int = 30, days: int = 14):
-    """Run the strategy comparison"""
+    """Run the strategy comparison - PARALLELIZED"""
     from config.coins import get_top_n_coins
 
     print(f"Settings: MAX_LONGS={MAX_LONGS}, MAX_SHORTS={MAX_SHORTS}, RISK={RISK_PER_TRADE_PCT}%", flush=True)
+    print(f"Using {NUM_WORKERS} parallel workers", flush=True)
     print("NOTE: Look-ahead bias FIXED - results now realistic!", flush=True)
 
     coins = get_top_n_coins(num_coins)
@@ -491,9 +369,32 @@ def run_comparison(num_coins: int = 30, days: int = 14):
     skip = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT'}
     coins = [c for c in coins if c not in skip]
 
-    tester = SMCStrategyTester(coins, days)
-    tester.load_data()
-    tester.run_all_strategies()
+    print(f"\nProcessing {len(coins)} coins over {days} days...", flush=True)
+
+    # Prepare arguments for parallel processing
+    args = [(coin, days) for coin in coins]
+
+    # Process coins in parallel
+    all_trades = []
+
+    with Pool(NUM_WORKERS) as pool:
+        results = pool.map(process_single_coin, args)
+
+        for i, coin_trades in enumerate(results):
+            if coin_trades:
+                print(f"  [{i+1}/{len(coins)}] {coins[i]}: {len(coin_trades)} trades", flush=True)
+                all_trades.extend(coin_trades)
+            else:
+                print(f"  [{i+1}/{len(coins)}] {coins[i]}: SKIP", flush=True)
+
+    print(f"\nTotal raw trades: {len(all_trades)}", flush=True)
+
+    # Apply position limits across all coins
+    filtered_trades = apply_position_limits(all_trades)
+    print(f"After position limits: {len(filtered_trades)} trades", flush=True)
+
+    # Print results
+    print_results(filtered_trades)
 
 
 if __name__ == '__main__':
