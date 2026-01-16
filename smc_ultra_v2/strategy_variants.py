@@ -39,6 +39,9 @@ MAX_SHORTS = int(os.getenv('MAX_SHORTS', '2'))
 # Parallelization
 NUM_WORKERS = int(os.getenv('NUM_WORKERS', str(min(8, cpu_count()))))
 
+# Precision mode: use 1min candles for exit checking
+USE_1MIN_EXITS = True
+
 
 @dataclass
 class VariantConfig:
@@ -116,7 +119,11 @@ VARIANTS = [
 
 
 def process_coin_for_variant(args) -> List[Trade]:
-    """Process a single coin for a specific variant"""
+    """Process a single coin for a specific variant
+
+    Uses 5min candles for signal generation (OB detection, EMA trend)
+    Uses 1min candles for precise SL/TP exit checking
+    """
     symbol, days, variant = args
 
     # Disable SSL verification
@@ -139,32 +146,45 @@ def process_coin_for_variant(args) -> List[Trade]:
         end = datetime.now()
         start = end - timedelta(days=days + 5)
 
-        df = dl.load_or_download(symbol, "5", days + 10)
-        if df is None or len(df) < 200:
+        # Load 5min data for signal generation
+        df_5m = dl.load_or_download(symbol, "5", days + 10)
+        if df_5m is None or len(df_5m) < 200:
             return []
 
-        mask = (df['timestamp'] >= start) & (df['timestamp'] <= end)
-        df = df[mask].reset_index(drop=True)
+        # Load 1min data for precise exit checking
+        df_1m = None
+        if USE_1MIN_EXITS:
+            df_1m = dl.load_or_download(symbol, "1", days + 10)
+            if df_1m is None or len(df_1m) < 1000:
+                df_1m = None  # Fall back to 5min exits
 
-        if len(df) < 100:
+        mask = (df_5m['timestamp'] >= start) & (df_5m['timestamp'] <= end)
+        df_5m = df_5m[mask].reset_index(drop=True)
+
+        if len(df_5m) < 100:
             return []
 
-        # Calculate indicators
-        high_low = df['high'] - df['low']
-        high_close = abs(df['high'] - df['close'].shift())
-        low_close = abs(df['low'] - df['close'].shift())
+        # Filter 1min data if available
+        if df_1m is not None:
+            mask = (df_1m['timestamp'] >= start) & (df_1m['timestamp'] <= end)
+            df_1m = df_1m[mask].reset_index(drop=True)
+
+        # Calculate indicators on 5min
+        high_low = df_5m['high'] - df_5m['low']
+        high_close = abs(df_5m['high'] - df_5m['close'].shift())
+        low_close = abs(df_5m['low'] - df_5m['close'].shift())
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df['atr'] = tr.rolling(14).mean()
-        df['ema20'] = df['close'].ewm(span=20).mean()
-        df['ema50'] = df['close'].ewm(span=50).mean()
+        df_5m['atr'] = tr.rolling(14).mean()
+        df_5m['ema20'] = df_5m['close'].ewm(span=20).mean()
+        df_5m['ema50'] = df_5m['close'].ewm(span=50).mean()
 
-        atr = df['atr']
-        obs = ob_det.detect(df, atr)
+        atr = df_5m['atr']
+        obs = ob_det.detect(df_5m, atr)
 
         active_trade = None
 
-        for idx in range(50, len(df)):
-            candle = df.iloc[idx]
+        for idx in range(50, len(df_5m)):
+            candle = df_5m.iloc[idx]
             ts = candle['timestamp']
             price = candle['close']
             atr_val = candle['atr']
@@ -172,9 +192,12 @@ def process_coin_for_variant(args) -> List[Trade]:
             if pd.isna(atr_val) or atr_val <= 0:
                 continue
 
-            # Check and close active trade
+            # Check and close active trade using 1min precision
             if active_trade:
-                closed = check_trade_exit(active_trade, candle)
+                if df_1m is not None and USE_1MIN_EXITS:
+                    closed = check_trade_exit_1min(active_trade, df_1m, ts)
+                else:
+                    closed = check_trade_exit(active_trade, candle)
                 if closed:
                     trades.append(active_trade)
                     active_trade = None
@@ -224,9 +247,12 @@ def process_coin_for_variant(args) -> List[Trade]:
                 )
 
         # Close remaining trade
-        if active_trade and len(df) > 0:
-            last_candle = df.iloc[-1]
-            check_trade_exit(active_trade, last_candle)
+        if active_trade and len(df_5m) > 0:
+            last_candle = df_5m.iloc[-1]
+            if df_1m is not None and USE_1MIN_EXITS:
+                check_trade_exit_1min(active_trade, df_1m, last_candle['timestamp'])
+            else:
+                check_trade_exit(active_trade, last_candle)
             if active_trade.exit_time:
                 trades.append(active_trade)
 
@@ -246,10 +272,10 @@ def create_trade_with_variant(
     if variant.use_ob_entry:
         if direction == 'long':
             # For long: enter at OB top (limit buy fills here)
-            entry = ob.top * 1.0002  # Small buffer for slippage
+            entry = ob.top  # Exact OB edge - maximum accuracy
         else:
             # For short: enter at OB bottom (limit sell fills here)
-            entry = ob.bottom * 0.9998
+            entry = ob.bottom  # Exact OB edge - maximum accuracy
     else:
         # Traditional: entry at close with small slippage
         if direction == 'long':
@@ -289,7 +315,7 @@ def create_trade_with_variant(
 
 
 def check_trade_exit(trade: Trade, candle) -> bool:
-    """Check if trade should exit"""
+    """Check if trade should exit (5min fallback)"""
     fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)
     fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)
 
@@ -327,6 +353,65 @@ def check_trade_exit(trade: Trade, candle) -> bool:
             trade.pnl_leveraged = trade.pnl_pct * trade.leverage
             trade.exit_time = candle['timestamp']
             return True
+
+    return False
+
+
+def check_trade_exit_1min(trade: Trade, df_1m: pd.DataFrame, current_5m_ts: datetime) -> bool:
+    """Check trade exit using 1min candles for precision.
+
+    Iterates through 1min candles from trade entry to current 5min candle.
+    This gives us exact order of SL vs TP hits.
+    """
+    fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)
+    fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)
+
+    # Get 1min candles from entry time to current 5min candle
+    mask = (df_1m['timestamp'] > trade.entry_time) & (df_1m['timestamp'] <= current_5m_ts)
+    candles_to_check = df_1m[mask]
+
+    if len(candles_to_check) == 0:
+        return False
+
+    for _, candle in candles_to_check.iterrows():
+        if trade.direction == 'long':
+            # Check SL first (hit if low <= sl)
+            if candle['low'] <= trade.sl:
+                trade.exit_price = trade.sl
+                trade.result = 'loss'
+                gross_pnl = (trade.sl - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_loss
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+            # Check TP (hit if high >= tp)
+            elif candle['high'] >= trade.tp:
+                trade.exit_price = trade.tp
+                trade.result = 'win'
+                gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_win
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+        else:  # short
+            # Check SL first (hit if high >= sl)
+            if candle['high'] >= trade.sl:
+                trade.exit_price = trade.sl
+                trade.result = 'loss'
+                gross_pnl = (trade.entry - trade.sl) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_loss
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+            # Check TP (hit if low <= tp)
+            elif candle['low'] <= trade.tp:
+                trade.exit_price = trade.tp
+                trade.result = 'win'
+                gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_win
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
 
     return False
 
@@ -418,6 +503,8 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
     print(f"Testing {len(variants)} variants on {num_coins} coins over {days} days")
     print(f"Position limits: MAX_LONGS={MAX_LONGS}, MAX_SHORTS={MAX_SHORTS}")
     print(f"Using {NUM_WORKERS} parallel workers")
+    print(f"Exit precision: {'1MIN CANDLES (accurate)' if USE_1MIN_EXITS else '5min candles'}")
+    print(f"Entry precision: OB EDGE (limit order at OB top/bottom)")
     print("=" * 100)
 
     coins = get_top_n_coins(num_coins)

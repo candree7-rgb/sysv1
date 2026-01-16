@@ -181,7 +181,7 @@ def process_single_coin(args) -> List[Trade]:
                     active_obs.append(ob)
 
             # Check for OB entry with quality filters
-            in_ob = False
+            matching_ob = None
             for ob in active_obs:
                 if (trend == 'long' and ob.is_bullish) or (trend == 'short' and not ob.is_bullish):
                     if ob.bottom <= price <= ob.top:
@@ -195,11 +195,11 @@ def process_single_coin(args) -> List[Trade]:
                         if ob_age_candles > OB_MAX_AGE_CANDLES:
                             continue
 
-                        in_ob = True
+                        matching_ob = ob
                         break
 
-            if in_ob:
-                active_trade = create_trade(symbol, trend, price, atr_val, ts)
+            if matching_ob:
+                active_trade = create_trade(symbol, trend, price, atr_val, ts, matching_ob)
 
         # Close any remaining trade
         if active_trade and len(df_5m) > 0:
@@ -276,17 +276,36 @@ def check_trade_exit_1min(trade: Trade, df_1m: pd.DataFrame, current_5m_ts: date
     return False
 
 
-def create_trade(symbol: str, direction: str, price: float, atr: float, ts: datetime) -> Trade:
-    """Create a trade with 1:1.5 RR and dynamic leverage"""
+def create_trade(symbol: str, direction: str, price: float, atr: float, ts: datetime, ob=None) -> Trade:
+    """Create a trade with 1:1.5 RR and dynamic leverage
+
+    Entry price: Uses OB edge for realistic limit order fill
+    - Long: Entry at OB top (where limit buy would fill)
+    - Short: Entry at OB bottom (where limit sell would fill)
+    """
     sl_mult = 1.0
     tp_mult = 1.5
 
+    # Use OB edge for precise entry (realistic limit order fill)
+    if ob is not None:
+        if direction == 'long':
+            # Long: Limit buy at OB top (price enters from above)
+            entry = ob.top
+        else:
+            # Short: Limit sell at OB bottom (price enters from below)
+            entry = ob.bottom
+    else:
+        # Fallback to price with slippage
+        if direction == 'long':
+            entry = price * 1.0003
+        else:
+            entry = price * 0.9997
+
+    # Calculate SL/TP from entry
     if direction == 'long':
-        entry = price * 1.0003
         sl = entry - atr * sl_mult
         tp = entry + atr * tp_mult
     else:
-        entry = price * 0.9997
         sl = entry + atr * sl_mult
         tp = entry - atr * tp_mult
 
@@ -476,6 +495,7 @@ def run_comparison(num_coins: int = 200, days: int = 90):
     print(f"Filters: OB_STRENGTH>={OB_MIN_STRENGTH}, OB_AGE<={OB_MAX_AGE_CANDLES} candles", flush=True)
     print(f"Using {NUM_WORKERS} parallel workers", flush=True)
     print(f"Exit precision: {'1MIN CANDLES (accurate)' if USE_1MIN_EXITS else '5min candles'}", flush=True)
+    print(f"Entry precision: OB EDGE (limit order at OB top/bottom)", flush=True)
     print("NOTE: Look-ahead bias FIXED - results now realistic!", flush=True)
 
     coins = get_top_n_coins(num_coins)
