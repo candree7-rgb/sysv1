@@ -71,9 +71,10 @@ class BybitDataDownloader:
         self.data_dir = Path(data_dir or config.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Rate limiting
-        self.request_delay = 0.05  # 50ms between requests
+        # Rate limiting - conservative to avoid 10006 errors
+        self.request_delay = 0.5  # 500ms between requests (was 50ms)
         self.last_request_time = 0
+        self.rate_limit_backoff = 1  # Exponential backoff multiplier
 
     def _rate_limit(self):
         """Ensure we don't hit rate limits"""
@@ -153,36 +154,57 @@ class BybitDataDownloader:
         current_end = end_time
         request_count = 0
 
+        backoff = 1  # Start with 1 second backoff
+        max_retries = 5
+
         while current_end > start_time:
             self._rate_limit()
 
-            try:
-                response = self.client.get_kline(
-                    category="linear",
-                    symbol=symbol,
-                    interval=interval,
-                    end=int(current_end.timestamp() * 1000),
-                    limit=1000
-                )
+            for retry in range(max_retries):
+                try:
+                    response = self.client.get_kline(
+                        category="linear",
+                        symbol=symbol,
+                        interval=interval,
+                        end=int(current_end.timestamp() * 1000),
+                        limit=1000
+                    )
 
-                if response['retCode'] != 0:
-                    print(f"  Error for {symbol}: {response['retMsg']}")
-                    break
+                    # Check for rate limit error (10006)
+                    if response['retCode'] == 10006:
+                        wait_time = backoff * (2 ** retry)  # Exponential backoff
+                        print(f"  Rate limit for {symbol}, waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue  # Retry
 
-                klines = response['result']['list']
-                if not klines:
-                    break
+                    if response['retCode'] != 0:
+                        print(f"  Error for {symbol}: {response['retMsg']}")
+                        return pd.DataFrame()  # Give up on this coin
 
-                all_data.extend(klines)
-                request_count += 1
+                    klines = response['result']['list']
+                    if not klines:
+                        break
 
-                # Älteste Kerze als neues End
-                oldest_ts = int(klines[-1][0])
-                current_end = datetime.utcfromtimestamp(oldest_ts / 1000)
+                    all_data.extend(klines)
+                    request_count += 1
 
-            except Exception as e:
-                print(f"  Exception for {symbol}: {e}")
-                break
+                    # Älteste Kerze als neues End
+                    oldest_ts = int(klines[-1][0])
+                    current_end = datetime.utcfromtimestamp(oldest_ts / 1000)
+                    break  # Success, exit retry loop
+
+                except Exception as e:
+                    if '10006' in str(e) or 'rate limit' in str(e).lower():
+                        wait_time = backoff * (2 ** retry)
+                        print(f"  Rate limit exception for {symbol}, waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue  # Retry
+                    print(f"  Exception for {symbol}: {e}")
+                    return pd.DataFrame()  # Give up on this coin
+            else:
+                # All retries exhausted
+                print(f"  Max retries reached for {symbol}, skipping...")
+                return pd.DataFrame()
 
         if not all_data:
             return pd.DataFrame()
