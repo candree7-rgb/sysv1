@@ -185,6 +185,14 @@ def process_single_coin(args) -> List[Trade]:
             for ob in active_obs:
                 if (trend == 'long' and ob.is_bullish) or (trend == 'short' and not ob.is_bullish):
                     if ob.bottom <= price <= ob.top:
+                        # CRITICAL: Verify limit order would have filled
+                        # Long: price must DROP to ob.top (low <= ob.top)
+                        # Short: price must RISE to ob.bottom (high >= ob.bottom)
+                        if trend == 'long' and candle['low'] > ob.top:
+                            continue  # Price never reached our limit buy
+                        if trend == 'short' and candle['high'] < ob.bottom:
+                            continue  # Price never reached our limit sell
+
                         # Filter 1: OB Strength
                         if ob.strength < OB_MIN_STRENGTH:
                             continue
