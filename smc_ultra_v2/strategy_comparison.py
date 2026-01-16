@@ -35,6 +35,10 @@ MIN_LEVERAGE = 5
 MAX_LONGS = int(os.getenv('MAX_LONGS', '2'))
 MAX_SHORTS = int(os.getenv('MAX_SHORTS', '2'))
 
+# OB Quality Filters
+OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.6'))  # Minimum OB strength (0-1)
+OB_MAX_AGE_CANDLES = int(os.getenv('OB_MAX_AGE', '100'))       # Max OB age in candles (~8h for 5min)
+
 # Parallelization
 NUM_WORKERS = int(os.getenv('NUM_WORKERS', str(min(8, cpu_count()))))
 
@@ -139,11 +143,21 @@ def process_single_coin(args) -> List[Trade]:
                 elif ob.mitigation_timestamp is not None and ob.mitigation_timestamp > ts:
                     active_obs.append(ob)
 
-            # Check for OB entry
+            # Check for OB entry with quality filters
             in_ob = False
             for ob in active_obs:
                 if (trend == 'long' and ob.is_bullish) or (trend == 'short' and not ob.is_bullish):
                     if ob.bottom <= price <= ob.top:
+                        # Filter 1: OB Strength
+                        if ob.strength < OB_MIN_STRENGTH:
+                            continue
+
+                        # Filter 2: OB Age (freshness)
+                        ob_age_minutes = (ts - ob.timestamp).total_seconds() / 60
+                        ob_age_candles = ob_age_minutes / 5  # 5min candles
+                        if ob_age_candles > OB_MAX_AGE_CANDLES:
+                            continue
+
                         in_ob = True
                         break
 
@@ -355,11 +369,12 @@ def print_results(trades: List[Trade]):
     print(f"  {'ob_retest':<15} $10,000 -> ${equity:>10,.2f} ({return_pct:>+7.2f}%)  MaxDD: {max_dd:.1f}%")
 
 
-def run_comparison(num_coins: int = 30, days: int = 14):
+def run_comparison(num_coins: int = 200, days: int = 90):
     """Run the strategy comparison - PARALLELIZED"""
     from config.coins import get_top_n_coins
 
     print(f"Settings: MAX_LONGS={MAX_LONGS}, MAX_SHORTS={MAX_SHORTS}, RISK={RISK_PER_TRADE_PCT}%", flush=True)
+    print(f"Filters: OB_STRENGTH>={OB_MIN_STRENGTH}, OB_AGE<={OB_MAX_AGE_CANDLES} candles", flush=True)
     print(f"Using {NUM_WORKERS} parallel workers", flush=True)
     print("NOTE: Look-ahead bias FIXED - results now realistic!", flush=True)
 

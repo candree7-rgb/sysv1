@@ -22,7 +22,7 @@ threading.excepthook = _silent_thread_exception
 
 # Config from env
 MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest
-NUM_COINS = int(os.getenv('BOT_COINS', '100'))  # Number of coins to trade (100 for better sample)
+NUM_COINS = int(os.getenv('BOT_COINS', '200'))  # Number of coins to trade (200 for better sample)
 USE_TESTNET = os.getenv('USE_TESTNET', 'false').lower() == 'true'  # true = testnet.bybit.com, false = bybit.com demo
 MIN_CONFIDENCE = int(os.getenv('MIN_CONFIDENCE', '60'))  # Minimum confidence for trades
 # Hedged exposure: separate limits for longs and shorts
