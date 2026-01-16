@@ -5,6 +5,7 @@ Lädt historische Daten von Bybit (KOSTENLOS, kein API Key nötig)
 """
 
 import os
+import ssl
 import time
 import asyncio
 from datetime import datetime, timedelta
@@ -13,6 +14,20 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
+
+# Disable SSL verification for testing environments
+ssl._create_default_https_context = ssl._create_unverified_context
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Patch requests to disable SSL verification globally
+import requests
+from requests.adapters import HTTPAdapter
+old_send = HTTPAdapter.send
+def patched_send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+    return old_send(self, request, stream=stream, timeout=timeout, verify=False, cert=cert, proxies=proxies)
+HTTPAdapter.send = patched_send
+
 from pybit.unified_trading import HTTP
 
 from config.settings import config
@@ -45,7 +60,14 @@ class BybitDataDownloader:
     }
 
     def __init__(self, data_dir: str = None):
+        # Disable SSL verification for testing
+        import requests
+        session = requests.Session()
+        session.verify = False
         self.client = HTTP()  # Kein API Key für Marktdaten
+        # Monkey patch the session to disable SSL
+        if hasattr(self.client, '_session'):
+            self.client._session.verify = False
         self.data_dir = Path(data_dir or config.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 

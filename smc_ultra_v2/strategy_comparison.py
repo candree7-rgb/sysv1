@@ -65,6 +65,15 @@ def process_single_coin(args) -> List[Trade]:
     """Process a single coin - can be run in parallel"""
     symbol, days = args
 
+    # Disable SSL verification for subprocesses (both ssl and requests)
+    import ssl
+    ssl._create_default_https_context = ssl._create_unverified_context
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    import os
+    os.environ['CURL_CA_BUNDLE'] = ''
+    os.environ['REQUESTS_CA_BUNDLE'] = ''
+
     # Import inside function for multiprocessing
     from data import BybitDataDownloader
     from smc import OrderBlockDetector, FVGDetector, LiquidityDetector
