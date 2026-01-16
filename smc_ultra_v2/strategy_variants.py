@@ -207,10 +207,13 @@ def process_coin_for_variant(args) -> List[Trade]:
             sweeps = liq_det.find_sweeps(df_5m, lookback_bars=20)
 
         active_trade = None
+        pending_signal = None  # Store signal from previous candle for next-bar entry
 
-        for idx in range(50, len(df_5m)):
+        for idx in range(50, len(df_5m) - 1):  # -1 because we need idx+1 for fill check
             candle = df_5m.iloc[idx]
+            next_candle = df_5m.iloc[idx + 1]  # Next candle for fill verification
             ts = candle['timestamp']
+            next_ts = next_candle['timestamp']
             price = candle['close']
             atr_val = candle['atr']
 
@@ -220,15 +223,39 @@ def process_coin_for_variant(args) -> List[Trade]:
             # Check and close active trade using 1min precision
             if active_trade:
                 if df_1m is not None and USE_1MIN_EXITS:
-                    closed = check_trade_exit_1min(active_trade, df_1m, ts)
+                    closed = check_trade_exit_1min(active_trade, df_1m, next_ts)
                 else:
-                    closed = check_trade_exit(active_trade, candle)
+                    closed = check_trade_exit(active_trade, next_candle)
                 if closed:
                     trades.append(active_trade)
                     active_trade = None
 
             if active_trade:
                 continue
+
+            # =====================================================
+            # NEXT-BAR ENTRY: Check if pending signal fills
+            # =====================================================
+            if pending_signal:
+                sig = pending_signal
+                pending_signal = None  # Clear it
+
+                # Check if next_candle fills our limit order
+                # Long: price must DROP to ob.top (low <= ob.top)
+                # Short: price must RISE to ob.bottom (high >= ob.bottom)
+                filled = False
+                if sig['trend'] == 'long' and next_candle['low'] <= sig['ob'].top:
+                    filled = True
+                elif sig['trend'] == 'short' and next_candle['high'] >= sig['ob'].bottom:
+                    filled = True
+
+                if filled:
+                    # Create trade with next_candle timestamp (realistic fill time)
+                    active_trade = create_trade_with_variant(
+                        symbol, sig['trend'], sig['price'], sig['atr'],
+                        next_ts, sig['ob'], variant  # Use next_ts as entry time
+                    )
+                    continue  # Don't look for new signals this candle
 
             # Get trend direction
             if candle['close'] > candle['ema20'] > candle['ema50']:
@@ -283,19 +310,13 @@ def process_coin_for_variant(args) -> List[Trade]:
                     continue  # No recent bearish sweep
 
             # =====================================================
-            # Check for OB entry with variant-specific filters
+            # Check for OB signal (fill verified on NEXT candle)
             # =====================================================
             matching_ob = None
             for ob in active_obs:
                 if (trend == 'long' and ob.is_bullish) or (trend == 'short' and not ob.is_bullish):
                     if ob.bottom <= price <= ob.top:
-                        # CRITICAL: Verify limit order would have filled
-                        # Long: price must DROP to ob.top (low <= ob.top)
-                        # Short: price must RISE to ob.bottom (high >= ob.bottom)
-                        if trend == 'long' and candle['low'] > ob.top:
-                            continue  # Price never reached our limit buy
-                        if trend == 'short' and candle['high'] < ob.bottom:
-                            continue  # Price never reached our limit sell
+                        # NOTE: We NO LONGER check fill here - that happens next candle!
 
                         # Filter 1: OB Strength (variant-specific)
                         if ob.strength < variant.ob_min_strength:
@@ -329,10 +350,15 @@ def process_coin_for_variant(args) -> List[Trade]:
                         matching_ob = ob
                         break
 
+            # Store signal for next-bar fill check (instead of immediate entry)
             if matching_ob:
-                active_trade = create_trade_with_variant(
-                    symbol, trend, price, atr_val, ts, matching_ob, variant
-                )
+                pending_signal = {
+                    'trend': trend,
+                    'price': price,
+                    'atr': atr_val,
+                    'ob': matching_ob,
+                    'signal_ts': ts
+                }
 
         # Close remaining trade
         if active_trade and len(df_5m) > 0:
