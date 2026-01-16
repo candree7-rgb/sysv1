@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import asyncio
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -192,9 +193,11 @@ async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coin
     print("[DEBUG] Trading loop started", flush=True)
     loop_count = 0
 
-    # Track pending limit orders: {order_id: {'symbol': str, 'placed_at': datetime, 'signal': Signal}}
+    # OB age config (same as backtest)
+    OB_MAX_AGE_CANDLES = int(os.getenv('OB_MAX_AGE', '50'))
+
+    # Track pending limit orders: {order_id: {'symbol': str, 'placed_at': datetime, 'signal': Signal, 'expiry_minutes': float}}
     pending_orders = {}
-    ORDER_EXPIRY_MINUTES = 15  # Cancel unfilled orders after 15 min
 
     while True:
         loop_count += 1
@@ -213,13 +216,15 @@ async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coin
 
             print(f"\n[{datetime.utcnow()}] Balance: ${balance['equity']:,.2f}", flush=True)
 
-            # Check and cancel expired pending orders
+            # Check and cancel expired pending orders (OB age based)
             now = datetime.utcnow()
             expired_orders = []
             for order_id, order_info in pending_orders.items():
                 age_minutes = (now - order_info['placed_at']).total_seconds() / 60
-                if age_minutes > ORDER_EXPIRY_MINUTES:
-                    print(f"Cancelling expired order: {order_info['symbol']} (age: {age_minutes:.1f}min)", flush=True)
+                # Expiry based on remaining OB life: (max_age - current_age) * 5min per candle
+                expiry_minutes = order_info.get('expiry_minutes', 15)  # Fallback to 15 if not set
+                if age_minutes > expiry_minutes:
+                    print(f"Cancelling expired order: {order_info['symbol']} (OB expired, age: {age_minutes:.1f}min)", flush=True)
                     if executor.cancel_order(order_info['symbol'], order_id):
                         expired_orders.append(order_id)
 
@@ -280,16 +285,23 @@ async def _trading_loop(executor, ws, aggregator, signal_gen, position_mgr, coin
                         can_trade, reason = position_mgr.can_open_trade(best.symbol)
 
                         if can_trade:
+                            # Calculate order expiry based on remaining OB life
+                            ob_age = getattr(best, 'ob_age_candles', 0)
+                            remaining_candles = max(OB_MAX_AGE_CANDLES - ob_age, 5)  # At least 5 candles
+                            expiry_minutes = remaining_candles * 5  # 5min per candle
+
                             print(f"\nPlacing LIMIT order: {best.symbol} {best.direction} @ {best.entry_price:.4f}", flush=True)
                             print(f"  TP: {best.take_profit:.4f} (Limit) | SL: {best.stop_loss:.4f} (Market)", flush=True)
+                            print(f"  OB Age: {ob_age:.0f} candles | Expiry: {expiry_minutes:.0f}min", flush=True)
                             result = executor.open_position(best)
 
                             if result.success:
-                                # Track pending order
+                                # Track pending order with OB-based expiry
                                 pending_orders[result.order_id] = {
                                     'symbol': best.symbol,
                                     'placed_at': datetime.utcnow(),
-                                    'signal': best
+                                    'signal': best,
+                                    'expiry_minutes': expiry_minutes
                                 }
                                 print(f"Limit order placed: {result.order_id}", flush=True)
                             else:
