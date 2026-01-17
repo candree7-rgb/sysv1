@@ -686,7 +686,13 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
     print("=" * 100)
 
     coins = get_top_n_coins(num_coins)
-    skip = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FOGOUSDT', 'FHEUSDT', 'LITUSDT'}
+    # Default skip list (known problematic coins)
+    skip = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FOGOUSDT', 'FHEUSDT', 'LITUSDT', 'WHITEWHALEUSDT'}
+    # Add extra coins from env: SKIP_COINS=COIN1,COIN2,COIN3
+    extra_skip = os.getenv('SKIP_COINS', '')
+    if extra_skip:
+        skip.update(c.strip().upper() for c in extra_skip.split(',') if c.strip())
+        print(f"Extra skip coins from env: {extra_skip}")
     coins = [c for c in coins if c not in skip]
 
     all_results = []
