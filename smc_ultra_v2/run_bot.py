@@ -53,7 +53,7 @@ def download_minimal_data():
 
     # Download 7 days of 5min data (fast, enough for live)
     # Known problematic coins that often timeout/have no data
-    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT'}
+    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT'}
 
     successful = 0
     try:
@@ -126,7 +126,7 @@ def run_backtest():
 
     coins = get_top_n_coins(NUM_COINS)
     # Filter out skipped coins
-    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT'}
+    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT'}
     coins = [c for c in coins if c not in SKIP_COINS]
 
     end = datetime.utcnow()

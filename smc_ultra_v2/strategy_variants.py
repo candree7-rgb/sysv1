@@ -645,7 +645,7 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
     print("=" * 100)
 
     coins = get_top_n_coins(num_coins)
-    skip = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT'}
+    skip = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FOGOUSDT'}
     coins = [c for c in coins if c not in skip]
 
     all_results = []
