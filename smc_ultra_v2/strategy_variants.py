@@ -40,7 +40,8 @@ MAX_SHORTS = int(os.getenv('MAX_SHORTS', '2'))
 NUM_WORKERS = int(os.getenv('NUM_WORKERS', str(min(8, cpu_count()))))
 
 # Precision mode: use 1min candles for exit checking
-USE_1MIN_EXITS = True
+# Set USE_1MIN_EXITS=false for faster backtest (uses OHLC heuristic instead)
+USE_1MIN_EXITS = os.getenv('USE_1MIN_EXITS', 'true').lower() == 'true'
 
 
 @dataclass
@@ -435,44 +436,84 @@ def create_trade_with_variant(
 
 
 def check_trade_exit(trade: Trade, candle) -> bool:
-    """Check if trade should exit (5min fallback)"""
+    """Check if trade should exit (5min fallback with OHLC heuristic).
+
+    OHLC Heuristic for determining SL vs TP order when both could hit:
+    - Bullish candle (close > open): Price went Low → High, so Low hit first
+    - Bearish candle (close < open): Price went High → Low, so High hit first
+    """
     fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)
     fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)
 
+    is_bullish = candle['close'] > candle['open']
+
     if trade.direction == 'long':
-        if candle['low'] <= trade.sl:
+        sl_hit = candle['low'] <= trade.sl
+        tp_hit = candle['high'] >= trade.tp
+
+        if sl_hit and tp_hit:
+            # Both could hit - use OHLC heuristic
+            # Bullish: Low first → SL hit first
+            # Bearish: High first → TP hit first
+            if is_bullish:
+                result = 'loss'  # SL hit first
+            else:
+                result = 'win'   # TP hit first
+        elif sl_hit:
+            result = 'loss'
+        elif tp_hit:
+            result = 'win'
+        else:
+            return False
+
+        if result == 'loss':
             trade.exit_price = trade.sl
             trade.result = 'loss'
             gross_pnl = (trade.sl - trade.entry) / trade.entry * 100
             trade.pnl_pct = gross_pnl - fee_loss
-            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-            trade.exit_time = candle['timestamp']
-            return True
-        elif candle['high'] >= trade.tp:
+        else:
             trade.exit_price = trade.tp
             trade.result = 'win'
             gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
             trade.pnl_pct = gross_pnl - fee_win
-            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-            trade.exit_time = candle['timestamp']
-            return True
-    else:
-        if candle['high'] >= trade.sl:
+
+        trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+        trade.exit_time = candle['timestamp']
+        return True
+
+    else:  # short
+        sl_hit = candle['high'] >= trade.sl
+        tp_hit = candle['low'] <= trade.tp
+
+        if sl_hit and tp_hit:
+            # Both could hit - use OHLC heuristic
+            # Bullish: Low first → TP hit first (for short)
+            # Bearish: High first → SL hit first (for short)
+            if is_bullish:
+                result = 'win'   # TP hit first
+            else:
+                result = 'loss'  # SL hit first
+        elif sl_hit:
+            result = 'loss'
+        elif tp_hit:
+            result = 'win'
+        else:
+            return False
+
+        if result == 'loss':
             trade.exit_price = trade.sl
             trade.result = 'loss'
             gross_pnl = (trade.entry - trade.sl) / trade.entry * 100
             trade.pnl_pct = gross_pnl - fee_loss
-            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-            trade.exit_time = candle['timestamp']
-            return True
-        elif candle['low'] <= trade.tp:
+        else:
             trade.exit_price = trade.tp
             trade.result = 'win'
             gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
             trade.pnl_pct = gross_pnl - fee_win
-            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-            trade.exit_time = candle['timestamp']
-            return True
+
+        trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+        trade.exit_time = candle['timestamp']
+        return True
 
     return False
 
