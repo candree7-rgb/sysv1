@@ -91,6 +91,11 @@ class VariantResult:
     total_pnl: float
     max_dd: float
     final_equity: float
+    # Detailed stats
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
+    avg_leverage: float = 0.0
+    avg_rr: float = 0.0  # Risk/Reward achieved
 
 
 # Winner config with MTF Alignment (FINAL STRATEGY)
@@ -587,6 +592,12 @@ def calculate_variant_results(trades: List[Trade], variant: VariantConfig) -> Va
     pf = gross_win / gross_loss if gross_loss > 0 else gross_win
     total_pnl = gross_win - gross_loss
 
+    # Calculate detailed stats
+    avg_win = (gross_win / win_count) if win_count > 0 else 0
+    avg_loss = (gross_loss / loss_count) if loss_count > 0 else 0
+    avg_leverage = sum(t.leverage for t in trades) / total if total > 0 else 0
+    avg_rr = avg_win / avg_loss if avg_loss > 0 else avg_win
+
     # Calculate equity curve and max DD
     equity = 10000.0
     peak = 10000.0
@@ -609,7 +620,11 @@ def calculate_variant_results(trades: List[Trade], variant: VariantConfig) -> Va
         profit_factor=pf,
         total_pnl=total_pnl,
         max_dd=max_dd,
-        final_equity=equity
+        final_equity=equity,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
+        avg_leverage=avg_leverage,
+        avg_rr=avg_rr
     )
 
 
@@ -711,6 +726,11 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
     print(f"   Total PnL: {best.total_pnl:+.1f}%")
     print(f"   Max Drawdown: {best.max_dd:.1f}%")
     print(f"   $10,000 -> ${best.final_equity:,.0f}")
+    print(f"\n   📊 DETAILED STATS:")
+    print(f"   Avg Win:  +{best.avg_win:.2f}% (leveraged)")
+    print(f"   Avg Loss: -{best.avg_loss:.2f}% (leveraged)")
+    print(f"   Avg R:R:  {best.avg_rr:.2f}")
+    print(f"   Avg Leverage: {best.avg_leverage:.1f}x")
 
     return sorted_results
 
