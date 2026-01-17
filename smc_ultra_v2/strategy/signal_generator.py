@@ -21,7 +21,6 @@ import pandas as pd
 import numpy as np
 
 from config.settings import config
-from config.coins import coin_db
 
 # OB Quality Filters (same as backtest for 1:1 consistency)
 OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.8'))  # very_high_strength config
