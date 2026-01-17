@@ -12,6 +12,7 @@ from typing import List, Dict, Tuple
 from dataclasses import dataclass
 from enum import Enum
 from concurrent.futures import ProcessPoolExecutor, TimeoutError, as_completed
+from multiprocessing import cpu_count
 from itertools import product
 
 import pandas as pd
