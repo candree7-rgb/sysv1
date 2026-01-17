@@ -159,6 +159,9 @@ def process_coin_for_variant(args) -> List[Trade]:
     """
     symbol, days, variant = args
 
+    # Show which coin is being processed (helps identify stuck coins)
+    print(f"      [Worker] {symbol}...", flush=True)
+
     # Disable SSL verification
     import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
