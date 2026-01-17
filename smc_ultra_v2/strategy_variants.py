@@ -901,16 +901,16 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
                         if coin_trades:
                             all_trades.extend(coin_trades)
                         completed_count += 1
-                        if completed_count % 20 == 0:
-                            print(f"    Progress: {completed_count}/{len(coins)} coins")
+                        # Print every coin for live feedback
+                        print(f"    [{completed_count}/{len(coins)}] {coin} ✓", flush=True)
                     except Exception as e:
                         skipped_coins.append(coin)
-                        # Don't print every error, just count them
+                        print(f"    [{completed_count}/{len(coins)}] {coin} ✗ {str(e)[:30]}", flush=True)
             except TimeoutError:
                 # Total timeout exceeded - collect what we have
                 pending_coins = [future_to_coin[f] for f in future_to_coin if not f.done()]
                 skipped_coins.extend(pending_coins[:10])  # Just note first 10
-                print(f"    ⚠️ Total timeout - {len(pending_coins)} coins still pending")
+                print(f"    ⚠️ Total timeout - {len(pending_coins)} coins still pending", flush=True)
 
         print(f"    Completed: {completed_count}/{len(coins)} coins")
         if skipped_coins:
