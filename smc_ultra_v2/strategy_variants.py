@@ -6,16 +6,22 @@ Tests multiple OB_RETEST variants in parallel to find optimal parameters.
 
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 from dataclasses import dataclass
 from enum import Enum
-from multiprocessing import Pool, cpu_count
+from concurrent.futures import ProcessPoolExecutor, TimeoutError, as_completed
 from itertools import product
 
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+# Timeout settings for downloads
+COIN_TIMEOUT = int(os.getenv('COIN_TIMEOUT', '45'))  # seconds per coin
+COIN_DELAY = float(os.getenv('COIN_DELAY', '0.3'))   # delay between coins
 
 
 class SetupType(Enum):
@@ -838,11 +844,12 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
     print(f"Exit precision: {'1MIN CANDLES (accurate)' if USE_1MIN_EXITS else '5min candles'}")
     print(f"Entry precision: OB EDGE (limit order at OB top/bottom)")
     print(f"Dynamic SL: BE at {int(BE_THRESHOLD*100)}%, Trailing at {int(TRAIL_START*100)}% ({int(TRAIL_OFFSET*100)}% offset)")
+    print(f"Rate limit protection: {COIN_TIMEOUT}s timeout, {COIN_DELAY}s delay between coins")
     print("=" * 100)
 
     coins = get_top_n_coins(num_coins)
     # Default skip list (known problematic coins)
-    skip = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FOGOUSDT', 'FHEUSDT', 'LITUSDT', 'WHITEWHALEUSDT'}
+    skip = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FOGOUSDT', 'FHEUSDT', 'LITUSDT', 'WHITEWHALEUSDT', 'STABLEUSDT'}
     # Add extra coins from env: SKIP_COINS=COIN1,COIN2,COIN3
     extra_skip = os.getenv('SKIP_COINS', '')
     if extra_skip:
@@ -871,12 +878,39 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
         args = [(coin, days, variant) for coin in coins]
 
         all_trades = []
-        with Pool(NUM_WORKERS) as pool:
-            results = pool.map(process_coin_for_variant, args)
-            for coin_trades in results:
-                if coin_trades:
-                    all_trades.extend(coin_trades)
+        skipped_coins = []
+        completed_count = 0
 
+        with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+            # Submit all jobs with delay between submissions
+            future_to_coin = {}
+            for i, arg in enumerate(args):
+                coin = arg[0]
+                future = executor.submit(process_coin_for_variant, arg)
+                future_to_coin[future] = coin
+                if COIN_DELAY > 0 and i < len(args) - 1:
+                    time.sleep(COIN_DELAY)
+
+            # Collect results with timeout
+            for future in as_completed(future_to_coin):
+                coin = future_to_coin[future]
+                try:
+                    coin_trades = future.result(timeout=COIN_TIMEOUT)
+                    if coin_trades:
+                        all_trades.extend(coin_trades)
+                    completed_count += 1
+                    # Progress indicator
+                    if completed_count % 10 == 0:
+                        print(f"    Progress: {completed_count}/{len(coins)} coins processed")
+                except TimeoutError:
+                    skipped_coins.append(coin)
+                    print(f"    ⚠️ TIMEOUT ({COIN_TIMEOUT}s): {coin} - skipping")
+                except Exception as e:
+                    skipped_coins.append(coin)
+                    print(f"    ⚠️ ERROR: {coin} - {str(e)[:50]}")
+
+        if skipped_coins:
+            print(f"    ⚠️ Skipped {len(skipped_coins)} coins: {', '.join(skipped_coins)}")
         print(f"    Raw trades: {len(all_trades)}")
 
         # Apply position limits
