@@ -543,111 +543,186 @@ def check_trade_exit(trade: Trade, candle) -> bool:
     - Bullish candle (close > open): Price went Low → High, so Low hit first
     - Bearish candle (close < open): Price went High → Low, so High hit first
 
-    Dynamic SL Management:
-    - First updates BE/Trailing levels based on price progress
-    - Then checks exit against current_sl (not original sl)
+    CRITICAL: For bullish candles, we must check OLD SL first (Low hit first),
+    before updating SL based on High. For bearish candles, we update first
+    (High hit first), then check.
     """
-    # First: Update dynamic SL (BE and Trailing)
-    update_dynamic_sl(trade, candle)
-
     fee_win = (MAKER_FEE_PCT * 2) + (SLIPPAGE_PCT * 2)
     fee_loss = MAKER_FEE_PCT + TAKER_FEE_PCT + (SLIPPAGE_PCT * 2)
 
     is_bullish = candle['close'] > candle['open']
 
     if trade.direction == 'long':
-        # Use current_sl (dynamic) instead of original sl
-        sl_hit = candle['low'] <= trade.current_sl
-        tp_hit = candle['high'] >= trade.tp
+        # OHLC heuristic: Bullish = Low first, Bearish = High first
+        if is_bullish:
+            # Bullish candle: Low hit FIRST, then High
+            # 1. Check if OLD SL was hit (before updating)
+            old_sl_hit = candle['low'] <= trade.current_sl
+            if old_sl_hit:
+                # SL hit before price went up - exit with CURRENT (old) SL
+                trade.exit_price = trade.current_sl
+                gross_pnl = (trade.current_sl - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_loss
 
-        if sl_hit and tp_hit:
-            # Both could hit - use OHLC heuristic
-            # Bullish: Low first → SL hit first
-            # Bearish: High first → TP hit first
-            if is_bullish:
-                result = 'sl_exit'
-            else:
-                result = 'tp'
-        elif sl_hit:
-            result = 'sl_exit'
-        elif tp_hit:
-            result = 'tp'
-        else:
+                if trade.trailing_active:
+                    trade.exit_reason = 'trailing'
+                    trade.result = 'win' if gross_pnl > 0 else 'loss'
+                elif trade.break_even_hit:
+                    trade.exit_reason = 'be'
+                    trade.result = 'win' if gross_pnl > 0 else 'loss'
+                else:
+                    trade.exit_reason = 'sl'
+                    trade.result = 'loss'
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+
+            # 2. SL not hit, price went up - update SL based on High
+            update_dynamic_sl(trade, candle)
+
+            # 3. Check if TP hit (after price went up)
+            if candle['high'] >= trade.tp:
+                trade.exit_price = trade.tp
+                trade.result = 'win'
+                trade.exit_reason = 'tp'
+                gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_win
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+
             return False
 
-        if result == 'sl_exit':
-            trade.exit_price = trade.current_sl
-            gross_pnl = (trade.current_sl - trade.entry) / trade.entry * 100
-            trade.pnl_pct = gross_pnl - fee_loss
+        else:
+            # Bearish candle: High hit FIRST, then Low
+            # 1. Update SL based on High (price went up first)
+            update_dynamic_sl(trade, candle)
 
-            # Determine exit reason and result based on PnL
-            if trade.trailing_active:
-                trade.exit_reason = 'trailing'
-                trade.result = 'win' if gross_pnl > 0 else 'loss'
-            elif trade.break_even_hit:
-                trade.exit_reason = 'be'
-                trade.result = 'win' if gross_pnl > 0 else 'loss'
+            # 2. Check if TP hit (at the High)
+            tp_hit = candle['high'] >= trade.tp
+            # 3. Check if (updated) SL hit (at the Low, after High)
+            sl_hit = candle['low'] <= trade.current_sl
+
+            if tp_hit and sl_hit:
+                # Both could hit - High first means TP hit first
+                result = 'tp'
+            elif tp_hit:
+                result = 'tp'
+            elif sl_hit:
+                result = 'sl_exit'
             else:
-                trade.exit_reason = 'sl'
-                trade.result = 'loss'
-        else:  # TP hit
-            trade.exit_price = trade.tp
-            trade.result = 'win'
-            trade.exit_reason = 'tp'
-            gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
-            trade.pnl_pct = gross_pnl - fee_win
+                return False
 
-        trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-        trade.exit_time = candle['timestamp']
-        return True
+            if result == 'sl_exit':
+                trade.exit_price = trade.current_sl
+                gross_pnl = (trade.current_sl - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_loss
+
+                if trade.trailing_active:
+                    trade.exit_reason = 'trailing'
+                    trade.result = 'win' if gross_pnl > 0 else 'loss'
+                elif trade.break_even_hit:
+                    trade.exit_reason = 'be'
+                    trade.result = 'win' if gross_pnl > 0 else 'loss'
+                else:
+                    trade.exit_reason = 'sl'
+                    trade.result = 'loss'
+            else:  # TP hit
+                trade.exit_price = trade.tp
+                trade.result = 'win'
+                trade.exit_reason = 'tp'
+                gross_pnl = (trade.tp - trade.entry) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_win
+
+            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+            trade.exit_time = candle['timestamp']
+            return True
 
     else:  # short
-        # Use current_sl (dynamic) instead of original sl
-        sl_hit = candle['high'] >= trade.current_sl
-        tp_hit = candle['low'] <= trade.tp
+        # OHLC heuristic: Bullish = Low first, Bearish = High first
+        if is_bullish:
+            # Bullish candle for SHORT: Low hit FIRST (favorable), then High (SL)
+            # 1. Update SL based on Low (price went down first = good for short)
+            update_dynamic_sl(trade, candle)
 
-        if sl_hit and tp_hit:
-            # Both could hit - use OHLC heuristic
-            # Bullish: Low first → TP hit first (for short)
-            # Bearish: High first → SL hit first (for short)
-            if is_bullish:
+            # 2. Check if TP hit (at the Low)
+            tp_hit = candle['low'] <= trade.tp
+            # 3. Check if (updated) SL hit (at the High, after Low)
+            sl_hit = candle['high'] >= trade.current_sl
+
+            if tp_hit and sl_hit:
+                # Both could hit - Low first means TP hit first for short
                 result = 'tp'
-            else:
+            elif tp_hit:
+                result = 'tp'
+            elif sl_hit:
                 result = 'sl_exit'
-        elif sl_hit:
-            result = 'sl_exit'
-        elif tp_hit:
-            result = 'tp'
-        else:
-            return False
-
-        if result == 'sl_exit':
-            trade.exit_price = trade.current_sl
-            gross_pnl = (trade.entry - trade.current_sl) / trade.entry * 100
-            trade.pnl_pct = gross_pnl - fee_loss
-
-            # Determine exit reason and result based on PnL
-            if trade.trailing_active:
-                trade.exit_reason = 'trailing'
-                trade.result = 'win' if gross_pnl > 0 else 'loss'
-            elif trade.break_even_hit:
-                trade.exit_reason = 'be'
-                trade.result = 'win' if gross_pnl > 0 else 'loss'
             else:
-                trade.exit_reason = 'sl'
-                trade.result = 'loss'
-        else:  # TP hit
-            trade.exit_price = trade.tp
-            trade.result = 'win'
-            trade.exit_reason = 'tp'
-            gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
-            trade.pnl_pct = gross_pnl - fee_win
+                return False
 
-        trade.pnl_leveraged = trade.pnl_pct * trade.leverage
-        trade.exit_time = candle['timestamp']
-        return True
+            if result == 'sl_exit':
+                trade.exit_price = trade.current_sl
+                gross_pnl = (trade.entry - trade.current_sl) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_loss
 
-    return False
+                if trade.trailing_active:
+                    trade.exit_reason = 'trailing'
+                    trade.result = 'win' if gross_pnl > 0 else 'loss'
+                elif trade.break_even_hit:
+                    trade.exit_reason = 'be'
+                    trade.result = 'win' if gross_pnl > 0 else 'loss'
+                else:
+                    trade.exit_reason = 'sl'
+                    trade.result = 'loss'
+            else:  # TP hit
+                trade.exit_price = trade.tp
+                trade.result = 'win'
+                trade.exit_reason = 'tp'
+                gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_win
+
+            trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+            trade.exit_time = candle['timestamp']
+            return True
+
+        else:
+            # Bearish candle for SHORT: High hit FIRST (unfavorable), then Low
+            # 1. Check if OLD SL was hit (before updating)
+            old_sl_hit = candle['high'] >= trade.current_sl
+            if old_sl_hit:
+                # SL hit before price went down - exit with CURRENT (old) SL
+                trade.exit_price = trade.current_sl
+                gross_pnl = (trade.entry - trade.current_sl) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_loss
+
+                if trade.trailing_active:
+                    trade.exit_reason = 'trailing'
+                    trade.result = 'win' if gross_pnl > 0 else 'loss'
+                elif trade.break_even_hit:
+                    trade.exit_reason = 'be'
+                    trade.result = 'win' if gross_pnl > 0 else 'loss'
+                else:
+                    trade.exit_reason = 'sl'
+                    trade.result = 'loss'
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+
+            # 2. SL not hit, price went down - update SL based on Low
+            update_dynamic_sl(trade, candle)
+
+            # 3. Check if TP hit (after price went down)
+            if candle['low'] <= trade.tp:
+                trade.exit_price = trade.tp
+                trade.result = 'win'
+                trade.exit_reason = 'tp'
+                gross_pnl = (trade.entry - trade.tp) / trade.entry * 100
+                trade.pnl_pct = gross_pnl - fee_win
+                trade.pnl_leveraged = trade.pnl_pct * trade.leverage
+                trade.exit_time = candle['timestamp']
+                return True
+
+            return False
 
 
 def check_trade_exit_1min(trade: Trade, df_1m: pd.DataFrame, current_5m_ts: datetime) -> bool:
