@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # Timeout settings for downloads
 COIN_TIMEOUT = int(os.getenv('COIN_TIMEOUT', '45'))  # seconds per coin
 COIN_DELAY = float(os.getenv('COIN_DELAY', '0.3'))   # delay between coins
+TOTAL_TIMEOUT = int(os.getenv('TOTAL_TIMEOUT', '300'))  # 5 min default, use 900 for 90 days
 
 
 class SetupType(Enum):
@@ -851,7 +852,7 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
     print(f"Exit precision: {'1MIN CANDLES (accurate)' if USE_1MIN_EXITS else '5min candles'}")
     print(f"Entry precision: OB EDGE (limit order at OB top/bottom)")
     print(f"Dynamic SL: BE at {int(BE_THRESHOLD*100)}%, Trailing at {int(TRAIL_START*100)}% ({int(TRAIL_OFFSET*100)}% offset)")
-    print(f"Rate limit protection: {COIN_TIMEOUT}s timeout, {COIN_DELAY}s delay between coins")
+    print(f"Timeouts: {TOTAL_TIMEOUT}s total, {COIN_TIMEOUT}s per request")
     print("=" * 100)
 
     coins = get_top_n_coins(num_coins)
@@ -898,9 +899,8 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
 
             from concurrent.futures import as_completed
             try:
-                # 5 minute total timeout - show results with whatever completed
-                total_timeout = 300  # 5 minutes max
-                for future in as_completed(future_to_coin, timeout=total_timeout):
+                # Total timeout from env (default 5 min, use TOTAL_TIMEOUT=900 for 15 min)
+                for future in as_completed(future_to_coin, timeout=TOTAL_TIMEOUT):
                     coin = future_to_coin[future]
                     try:
                         coin_trades = future.result(timeout=5)
