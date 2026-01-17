@@ -159,11 +159,6 @@ def process_coin_for_variant(args) -> List[Trade]:
     """
     symbol, days, variant = args
 
-    # Debug: show worker started
-    import sys
-    print(f"      [Worker] Starting {symbol}...", flush=True)
-    sys.stdout.flush()
-
     # Disable SSL verification
     import ssl
     ssl._create_default_https_context = ssl._create_unverified_context
@@ -186,7 +181,6 @@ def process_coin_for_variant(args) -> List[Trade]:
         end = datetime.now()
         start = end - timedelta(days=days + 5)
 
-        print(f"      [Worker] {symbol} loading data...", flush=True)
         # Load 5min data for signal generation
         df_5m = dl.load_or_download(symbol, "5", days + 10)
         if df_5m is None or len(df_5m) < 200:
