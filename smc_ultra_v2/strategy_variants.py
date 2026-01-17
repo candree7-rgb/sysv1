@@ -882,36 +882,61 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
         skipped_coins = []
         completed_count = 0
 
-        with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
-            # Submit all jobs with delay between submissions
-            future_to_coin = {}
-            for i, arg in enumerate(args):
-                coin = arg[0]
-                future = executor.submit(process_coin_for_variant, arg)
-                future_to_coin[future] = coin
-                if COIN_DELAY > 0 and i < len(args) - 1:
-                    time.sleep(COIN_DELAY)
+        # Process coins in batches to handle timeouts properly
+        batch_size = NUM_WORKERS * 2  # Process 2x workers at a time
 
-            # Collect results with timeout
-            for future in as_completed(future_to_coin):
-                coin = future_to_coin[future]
-                try:
-                    coin_trades = future.result(timeout=COIN_TIMEOUT)
-                    if coin_trades:
-                        all_trades.extend(coin_trades)
-                    completed_count += 1
-                    # Progress indicator
-                    if completed_count % 10 == 0:
-                        print(f"    Progress: {completed_count}/{len(coins)} coins processed")
-                except TimeoutError:
+        for batch_start in range(0, len(args), batch_size):
+            batch_args = args[batch_start:batch_start + batch_size]
+            batch_coins = [a[0] for a in batch_args]
+
+            with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+                # Submit batch
+                future_to_coin = {}
+                for arg in batch_args:
+                    coin = arg[0]
+                    future = executor.submit(process_coin_for_variant, arg)
+                    future_to_coin[future] = coin
+
+                # Wait for batch with timeout
+                from concurrent.futures import wait, FIRST_COMPLETED
+                pending = set(future_to_coin.keys())
+
+                batch_timeout = COIN_TIMEOUT * len(batch_args)  # Total timeout for batch
+                start_time = time.time()
+
+                while pending and (time.time() - start_time) < batch_timeout:
+                    # Wait for any future to complete, with per-coin timeout
+                    done, pending = wait(pending, timeout=COIN_TIMEOUT, return_when=FIRST_COMPLETED)
+
+                    for future in done:
+                        coin = future_to_coin[future]
+                        try:
+                            coin_trades = future.result(timeout=1)  # Should be instant since it's done
+                            if coin_trades:
+                                all_trades.extend(coin_trades)
+                            completed_count += 1
+                        except Exception as e:
+                            skipped_coins.append(coin)
+                            print(f"    ⚠️ ERROR: {coin} - {str(e)[:50]}")
+
+                    # Progress
+                    if done:
+                        print(f"    Progress: {completed_count}/{len(coins)} coins", end='\r')
+
+                # Cancel any still pending (timed out)
+                for future in pending:
+                    coin = future_to_coin[future]
                     skipped_coins.append(coin)
                     print(f"    ⚠️ TIMEOUT ({COIN_TIMEOUT}s): {coin} - skipping")
-                except Exception as e:
-                    skipped_coins.append(coin)
-                    print(f"    ⚠️ ERROR: {coin} - {str(e)[:50]}")
+                    future.cancel()
 
+            # Small delay between batches
+            if batch_start + batch_size < len(args):
+                time.sleep(COIN_DELAY * 3)
+
+        print(f"\n    Completed: {completed_count}/{len(coins)} coins")
         if skipped_coins:
-            print(f"    ⚠️ Skipped {len(skipped_coins)} coins: {', '.join(skipped_coins)}")
+            print(f"    ⚠️ Skipped {len(skipped_coins)} coins: {', '.join(skipped_coins[:10])}{'...' if len(skipped_coins) > 10 else ''}")
         print(f"    Raw trades: {len(all_trades)}")
 
         # Apply position limits
