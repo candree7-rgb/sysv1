@@ -890,7 +890,7 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
 
         # Simple sequential processing with timeout per coin
         # More reliable than complex batch processing
-        print(f"    Processing {len(coins)} coins (max {COIN_TIMEOUT}s per coin)...")
+        print(f"    Processing {len(coins)} coins...")
 
         with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
             # Submit all at once
@@ -898,8 +898,8 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
 
             from concurrent.futures import as_completed
             try:
-                # Use as_completed with a total timeout
-                total_timeout = len(coins) * 15  # 15s average per coin should be plenty
+                # 5 minute total timeout - show results with whatever completed
+                total_timeout = 300  # 5 minutes max
                 for future in as_completed(future_to_coin, timeout=total_timeout):
                     coin = future_to_coin[future]
                     try:
