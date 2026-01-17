@@ -36,8 +36,8 @@ MIN_LEVERAGE = 5
 MAX_LONGS = int(os.getenv('MAX_LONGS', '2'))
 MAX_SHORTS = int(os.getenv('MAX_SHORTS', '2'))
 
-# Parallelization - reduced to avoid API rate limits
-NUM_WORKERS = int(os.getenv('NUM_WORKERS', '2'))  # Default 2, was 8
+# Parallelization
+NUM_WORKERS = int(os.getenv('NUM_WORKERS', str(min(8, cpu_count()))))
 
 # Precision mode: use 1min candles for exit checking
 USE_1MIN_EXITS = True
