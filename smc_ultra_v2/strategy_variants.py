@@ -913,10 +913,12 @@ def run_variant_comparison(num_coins: int = 100, days: int = 90, variants: List[
                         skipped_coins.append(coin)
                         print(f"    [{completed_count}/{len(coins)}] {coin} ✗ {str(e)[:30]}", flush=True)
             except TimeoutError:
-                # Total timeout exceeded - collect what we have
+                # Total timeout exceeded - force shutdown and use what we have
                 pending_coins = [future_to_coin[f] for f in future_to_coin if not f.done()]
-                skipped_coins.extend(pending_coins[:10])  # Just note first 10
+                skipped_coins.extend(pending_coins[:10])
                 print(f"    ⚠️ Total timeout - {len(pending_coins)} coins still pending", flush=True)
+                print(f"    Forcing shutdown...", flush=True)
+                executor.shutdown(wait=False, cancel_futures=True)
 
         print(f"    Completed: {completed_count}/{len(coins)} coins")
         if skipped_coins:
