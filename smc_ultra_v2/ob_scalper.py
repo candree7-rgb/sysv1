@@ -158,6 +158,10 @@ def process_coin(args) -> List[ScalpTrade]:
         if df_4h is not None:
             df_4h = calculate_indicators(df_4h)
 
+        # Add volume SMA for OB volume filter
+        if 'volume' in df_5m.columns:
+            df_5m['volume_sma'] = df_5m['volume'].rolling(20).mean()
+
         # Detect OBs on 5min (with detection_timestamp!)
         obs = ob_det.detect(df_5m, df_5m['close'].rolling(14).apply(
             lambda x: pd.Series(x).diff().abs().mean() if len(x) > 1 else 0
