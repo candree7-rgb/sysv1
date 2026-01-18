@@ -33,6 +33,10 @@ OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '100'))  # in 5min candles
 RR_TARGET = float(os.getenv('RR_TARGET', '2.0'))  # TP = RR_TARGET * SL
 SL_BUFFER_PCT = float(os.getenv('SL_BUFFER_PCT', '0.05'))  # Buffer beyond OB edge
 
+# Volume Filter - OB must have above-average volume (confirms institutional interest)
+MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
+USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
+
 # RSI Filter - DISABLED by default (too restrictive, filters good trades)
 RSI_LONG_MAX = int(os.getenv('RSI_LONG_MAX', '45'))
 RSI_SHORT_MIN = int(os.getenv('RSI_SHORT_MIN', '55'))
@@ -338,6 +342,11 @@ def run_backtest(
             if ob.strength < min_strength:
                 continue
 
+            # Filter by volume (confirms institutional interest)
+            if USE_VOLUME_FILTER:
+                if ob.volume_ratio < MIN_VOLUME_RATIO:
+                    continue  # Low volume OB - skip
+
             # Filter by age (in 5min candles)
             ob_age = (ts - ob.timestamp).total_seconds() / 300  # 5min = 300sec
             if ob_age > OB_MAX_AGE:
@@ -406,6 +415,7 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print("=" * 80)
     print(f"Coins: {num_coins} | Days: {days}")
     print(f"OB Strength: Long >= {OB_MIN_STRENGTH}, Short >= {OB_MIN_STRENGTH_SHORT} | Max Age: {OB_MAX_AGE}")
+    print(f"Volume Filter: {'ON (>=' + str(MIN_VOLUME_RATIO) + 'x avg)' if USE_VOLUME_FILTER else 'OFF'}")
     print(f"R:R Target: {RR_TARGET}:1 | SL Buffer: {SL_BUFFER_PCT}%")
     print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'}")
     print(f"Workers: {NUM_WORKERS} | Timeout: {TOTAL_TIMEOUT}s")
