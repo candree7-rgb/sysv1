@@ -37,6 +37,9 @@ RSI_LONG_MAX = int(os.getenv('RSI_LONG_MAX', '45'))
 RSI_SHORT_MIN = int(os.getenv('RSI_SHORT_MIN', '55'))
 USE_RSI_FILTER = os.getenv('USE_RSI_FILTER', 'false').lower() == 'true'  # OFF by default
 
+# 4H MTF Filter - requires 4H trend alignment in addition to 1H
+USE_4H_MTF = os.getenv('USE_4H_MTF', 'true').lower() == 'true'  # ON by default
+
 # Break-Even: Move SL to entry when price reaches X% toward TP
 # 80% is conservative - only triggers when almost at TP
 BE_THRESHOLD = float(os.getenv('BE_THRESHOLD', '0.8'))  # 80% toward TP (was 50%)
@@ -136,10 +139,19 @@ def process_coin(args) -> List[ScalpTrade]:
         if df_1h is None or len(df_1h) < 50:
             return []
 
+        # Load 4H data if MTF filter enabled
+        df_4h = None
+        if USE_4H_MTF:
+            df_4h = dl.load_or_download(symbol, "240", days + 60)
+            if df_4h is None or len(df_4h) < 20:
+                df_4h = None  # Fallback: skip 4H filter for this coin
+
         # Add indicators (RSI on 1min for pullback confirmation)
         df_5m = calculate_indicators(df_5m)
         df_1h = calculate_indicators(df_1h)
         df_1m = calculate_indicators(df_1m, include_rsi=True)  # RSI for entry filter
+        if df_4h is not None:
+            df_4h = calculate_indicators(df_4h)
 
         # Detect OBs on 5min (with detection_timestamp!)
         obs = ob_det.detect(df_5m, df_5m['close'].rolling(14).apply(
@@ -150,7 +162,7 @@ def process_coin(args) -> List[ScalpTrade]:
             return []
 
         # Run backtest
-        trades = run_backtest(symbol, df_5m, df_1m, df_1h, obs)
+        trades = run_backtest(symbol, df_5m, df_1m, df_1h, obs, df_4h)
 
     except Exception as e:
         print(f"      [Error] {symbol}: {str(e)[:50]}", flush=True)
@@ -164,7 +176,8 @@ def run_backtest(
     df_5m: pd.DataFrame,
     df_1m: pd.DataFrame,
     df_1h: pd.DataFrame,
-    obs: list
+    obs: list,
+    df_4h: pd.DataFrame = None
 ) -> List[ScalpTrade]:
     """
     Run backtest for a single coin.
@@ -267,17 +280,30 @@ def run_backtest(
             continue
         h1_candle = h1_candles.iloc[-1]
 
-        # Determine 1H trend (this is the ONLY MTF filter now)
-        # We removed 5min trend requirement because OB retest happens during pullbacks
-        # and during pullbacks, 5min EMAs won't be aligned (which is expected!)
+        # Determine 1H trend
         h1_bullish = h1_candle['close'] > h1_candle['ema20'] > h1_candle['ema50']
         h1_bearish = h1_candle['close'] < h1_candle['ema20'] < h1_candle['ema50']
 
         if not h1_bullish and not h1_bearish:
             continue  # No clear 1H trend - skip
 
-        # Direction based on 1H trend only
-        # The OB type (bullish/bearish) provides additional confirmation
+        # === 4H MTF FILTER ===
+        # Requires 4H trend to align with 1H for higher probability trades
+        if USE_4H_MTF and df_4h is not None:
+            ts_4h = ts.floor('4h')
+            h4_candles = df_4h[df_4h['timestamp'] <= ts_4h - pd.Timedelta(hours=4)]
+            if len(h4_candles) > 0:
+                h4_candle = h4_candles.iloc[-1]
+                h4_bullish = h4_candle['close'] > h4_candle['ema20'] > h4_candle['ema50']
+                h4_bearish = h4_candle['close'] < h4_candle['ema20'] < h4_candle['ema50']
+
+                # Skip if 4H doesn't confirm 1H direction
+                if h1_bullish and not h4_bullish:
+                    continue  # 1H bullish but 4H not confirming
+                if h1_bearish and not h4_bearish:
+                    continue  # 1H bearish but 4H not confirming
+
+        # Direction based on 1H trend (now confirmed by 4H if enabled)
         direction = 'long' if h1_bullish else 'short'
 
         # === RSI FILTER ===
@@ -379,6 +405,7 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print(f"Coins: {num_coins} | Days: {days}")
     print(f"OB Strength: >= {OB_MIN_STRENGTH} | OB Max Age: {OB_MAX_AGE} candles")
     print(f"R:R Target: {RR_TARGET}:1 | SL Buffer: {SL_BUFFER_PCT}%")
+    print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'}")
     print(f"Workers: {NUM_WORKERS} | Timeout: {TOTAL_TIMEOUT}s")
     print("=" * 80)
 
