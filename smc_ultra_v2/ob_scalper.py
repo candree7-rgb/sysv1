@@ -55,7 +55,8 @@ TRADE_DIRECTION = os.getenv('TRADE_DIRECTION', 'both').lower()
 # Break-Even: Move SL to entry when price reaches X% toward TP
 # 80% is conservative - only triggers when almost at TP
 BE_THRESHOLD = float(os.getenv('BE_THRESHOLD', '0.8'))  # 80% toward TP (was 50%)
-USE_BE = os.getenv('USE_BE', 'false').lower() == 'true'  # OFF by default
+USE_BE = os.getenv('USE_BE', 'false').lower() == 'true'  # OFF by default (global)
+USE_BE_SHORTS = os.getenv('USE_BE_SHORTS', 'false').lower() == 'true'  # BE only for shorts
 
 # Fees (Bybit Futures)
 MAKER_FEE = 0.0002  # 0.02%
@@ -256,8 +257,8 @@ def run_backtest(
             else:  # short
                 t.max_profit_price = min(t.max_profit_price, candle['low'])
 
-                # Check BE trigger
-                if USE_BE and not t.be_triggered:
+                # Check BE trigger (USE_BE_SHORTS allows BE only for shorts)
+                if (USE_BE or USE_BE_SHORTS) and not t.be_triggered:
                     tp_distance = t.entry_price - t.tp_price
                     current_profit = t.entry_price - t.max_profit_price
                     if current_profit >= tp_distance * BE_THRESHOLD:
