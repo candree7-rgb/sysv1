@@ -32,6 +32,15 @@ OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '100'))  # in 5min candles
 RR_TARGET = float(os.getenv('RR_TARGET', '2.0'))  # TP = RR_TARGET * SL
 SL_BUFFER_PCT = float(os.getenv('SL_BUFFER_PCT', '0.05'))  # Buffer beyond OB edge
 
+# RSI Filter - confirms we're in a pullback
+RSI_LONG_MAX = int(os.getenv('RSI_LONG_MAX', '45'))   # Long only when RSI < 45 (oversold/pullback)
+RSI_SHORT_MIN = int(os.getenv('RSI_SHORT_MIN', '55')) # Short only when RSI > 55 (overbought/pullback)
+USE_RSI_FILTER = os.getenv('USE_RSI_FILTER', 'true').lower() == 'true'
+
+# Break-Even: Move SL to entry when price reaches X% toward TP
+BE_THRESHOLD = float(os.getenv('BE_THRESHOLD', '0.5'))  # 50% toward TP
+USE_BE = os.getenv('USE_BE', 'true').lower() == 'true'
+
 # Fees (Bybit Futures)
 MAKER_FEE = 0.0002  # 0.02%
 TAKER_FEE = 0.00055  # 0.055%
@@ -53,19 +62,42 @@ class ScalpTrade:
     ob_bottom: float
     leverage: int = 10
 
+    # Dynamic SL for BE
+    current_sl: float = None  # Tracks SL (may move to entry for BE)
+    be_triggered: bool = False  # Has BE been activated?
+    max_profit_price: float = None  # Peak price reached
+
     # Results (filled after exit)
     exit_price: float = None
     exit_time: datetime = None
-    exit_reason: str = None  # 'tp', 'sl'
+    exit_reason: str = None  # 'tp', 'sl', 'be'
     pnl_pct: float = None
+
     pnl_gross: float = None
 
+    def __post_init__(self):
+        if self.current_sl is None:
+            self.current_sl = self.sl_price
+        if self.max_profit_price is None:
+            self.max_profit_price = self.entry_price
 
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add EMA indicators for trend detection"""
+
+def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Calculate RSI"""
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def calculate_indicators(df: pd.DataFrame, include_rsi: bool = False) -> pd.DataFrame:
+    """Add EMA and optionally RSI indicators"""
     df = df.copy()
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+    if include_rsi:
+        df['rsi'] = calculate_rsi(df['close'], 14)
     return df
 
 
@@ -103,9 +135,10 @@ def process_coin(args) -> List[ScalpTrade]:
         if df_1h is None or len(df_1h) < 50:
             return []
 
-        # Add indicators
+        # Add indicators (RSI on 1min for pullback confirmation)
         df_5m = calculate_indicators(df_5m)
         df_1h = calculate_indicators(df_1h)
+        df_1m = calculate_indicators(df_1m, include_rsi=True)  # RSI for entry filter
 
         # Detect OBs on 5min (with detection_timestamp!)
         obs = ob_det.detect(df_5m, df_5m['close'].rolling(14).apply(
@@ -158,37 +191,62 @@ def run_backtest(
 
         # === CHECK ACTIVE TRADE EXIT ===
         if active_trade:
-            # Check SL
-            if active_trade.direction == 'long':
-                if candle['low'] <= active_trade.sl_price:
-                    active_trade.exit_price = active_trade.sl_price
-                    active_trade.exit_reason = 'sl'
-                elif candle['high'] >= active_trade.tp_price:
-                    active_trade.exit_price = active_trade.tp_price
-                    active_trade.exit_reason = 'tp'
-            else:  # short
-                if candle['high'] >= active_trade.sl_price:
-                    active_trade.exit_price = active_trade.sl_price
-                    active_trade.exit_reason = 'sl'
-                elif candle['low'] <= active_trade.tp_price:
-                    active_trade.exit_price = active_trade.tp_price
-                    active_trade.exit_reason = 'tp'
+            t = active_trade  # Shorthand
 
-            if active_trade.exit_reason:
-                active_trade.exit_time = ts
+            # Update max profit price and check for BE trigger
+            if t.direction == 'long':
+                t.max_profit_price = max(t.max_profit_price, candle['high'])
+
+                # Check BE trigger: price reached X% toward TP
+                if USE_BE and not t.be_triggered:
+                    tp_distance = t.tp_price - t.entry_price
+                    current_profit = t.max_profit_price - t.entry_price
+                    if current_profit >= tp_distance * BE_THRESHOLD:
+                        t.be_triggered = True
+                        t.current_sl = t.entry_price  # Move SL to entry
+
+                # Check exits (use current_sl which may be at entry if BE triggered)
+                if candle['low'] <= t.current_sl:
+                    t.exit_price = t.current_sl
+                    t.exit_reason = 'be' if t.be_triggered else 'sl'
+                elif candle['high'] >= t.tp_price:
+                    t.exit_price = t.tp_price
+                    t.exit_reason = 'tp'
+
+            else:  # short
+                t.max_profit_price = min(t.max_profit_price, candle['low'])
+
+                # Check BE trigger
+                if USE_BE and not t.be_triggered:
+                    tp_distance = t.entry_price - t.tp_price
+                    current_profit = t.entry_price - t.max_profit_price
+                    if current_profit >= tp_distance * BE_THRESHOLD:
+                        t.be_triggered = True
+                        t.current_sl = t.entry_price  # Move SL to entry
+
+                # Check exits
+                if candle['high'] >= t.current_sl:
+                    t.exit_price = t.current_sl
+                    t.exit_reason = 'be' if t.be_triggered else 'sl'
+                elif candle['low'] <= t.tp_price:
+                    t.exit_price = t.tp_price
+                    t.exit_reason = 'tp'
+
+            if t.exit_reason:
+                t.exit_time = ts
 
                 # Calculate PnL with fees
-                if active_trade.direction == 'long':
-                    gross = (active_trade.exit_price - active_trade.entry_price) / active_trade.entry_price
+                if t.direction == 'long':
+                    gross = (t.exit_price - t.entry_price) / t.entry_price
                 else:
-                    gross = (active_trade.entry_price - active_trade.exit_price) / active_trade.entry_price
+                    gross = (t.entry_price - t.exit_price) / t.entry_price
 
                 # Fees: maker entry (limit), taker exit (market on SL/TP)
                 fees = MAKER_FEE + TAKER_FEE
-                active_trade.pnl_gross = gross * 100
-                active_trade.pnl_pct = (gross - fees) * 100 * active_trade.leverage
+                t.pnl_gross = gross * 100
+                t.pnl_pct = (gross - fees) * 100 * t.leverage
 
-                trades.append(active_trade)
+                trades.append(t)
                 active_trade = None
 
         # === LOOK FOR NEW ENTRY (only if no active trade) ===
@@ -220,6 +278,17 @@ def run_backtest(
         # Direction based on 1H trend only
         # The OB type (bullish/bearish) provides additional confirmation
         direction = 'long' if h1_bullish else 'short'
+
+        # === RSI FILTER ===
+        # Confirms we're actually in a pullback (not chasing)
+        if USE_RSI_FILTER:
+            rsi = candle.get('rsi', 50)  # Default 50 if not available
+            if pd.isna(rsi):
+                rsi = 50
+            if direction == 'long' and rsi > RSI_LONG_MAX:
+                continue  # RSI too high - not a pullback, skip
+            if direction == 'short' and rsi < RSI_SHORT_MIN:
+                continue  # RSI too low - not a pullback, skip
 
         # === FIND VALID OB ===
         current_price = candle['close']
@@ -354,8 +423,13 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
         return
 
     # === CALCULATE STATS ===
-    wins = [t for t in all_trades if t.exit_reason == 'tp']
-    losses = [t for t in all_trades if t.exit_reason == 'sl']
+    tp_exits = [t for t in all_trades if t.exit_reason == 'tp']
+    sl_exits = [t for t in all_trades if t.exit_reason == 'sl']
+    be_exits = [t for t in all_trades if t.exit_reason == 'be']
+
+    # Wins = TP + BE (BE is breakeven, small win/loss)
+    wins = tp_exits + [t for t in be_exits if t.pnl_pct >= 0]
+    losses = sl_exits + [t for t in be_exits if t.pnl_pct < 0]
 
     total_trades = len(all_trades)
     win_count = len(wins)
@@ -402,13 +476,20 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print(f"Avg Win:       {avg_win:+.2f}%")
     print(f"Avg Loss:      {avg_loss:+.2f}%")
     print(f"Avg R:R:       {abs(avg_win/avg_loss):.2f}" if avg_loss != 0 else "Avg R:R:       N/A")
+    print("-" * 40)
+    print("EXIT BREAKDOWN:")
+    print(f"  TP Hits:     {len(tp_exits)} ({len(tp_exits)/total_trades*100:.1f}%)")
+    print(f"  SL Hits:     {len(sl_exits)} ({len(sl_exits)/total_trades*100:.1f}%)")
+    print(f"  BE Exits:    {len(be_exits)} ({len(be_exits)/total_trades*100:.1f}%)")
     print("=" * 80)
 
     # Breakdown by direction
     longs = [t for t in all_trades if t.direction == 'long']
     shorts = [t for t in all_trades if t.direction == 'short']
-    long_wr = len([t for t in longs if t.exit_reason == 'tp']) / len(longs) * 100 if longs else 0
-    short_wr = len([t for t in shorts if t.exit_reason == 'tp']) / len(shorts) * 100 if shorts else 0
+    long_wins = len([t for t in longs if t.exit_reason in ['tp', 'be'] and t.pnl_pct >= 0])
+    short_wins = len([t for t in shorts if t.exit_reason in ['tp', 'be'] and t.pnl_pct >= 0])
+    long_wr = long_wins / len(longs) * 100 if longs else 0
+    short_wr = short_wins / len(shorts) * 100 if shorts else 0
 
     print(f"\nLongs:  {len(longs)} trades, {long_wr:.1f}% WR")
     print(f"Shorts: {len(shorts)} trades, {short_wr:.1f}% WR")
