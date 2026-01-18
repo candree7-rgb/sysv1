@@ -27,10 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 NUM_WORKERS = int(os.getenv('NUM_WORKERS', str(min(4, cpu_count()))))
 TOTAL_TIMEOUT = int(os.getenv('TOTAL_TIMEOUT', '300'))
 
-# Mean Reversion Settings
-RSI_OVERBOUGHT = int(os.getenv('RSI_OVERBOUGHT', '70'))  # Entry when RSI > this
-ATR_EXTENSION = float(os.getenv('ATR_EXTENSION', '1.5'))  # Price must be X ATR above EMA
+# Mean Reversion Settings - STRICT filters for quality over quantity
+RSI_OVERBOUGHT = int(os.getenv('RSI_OVERBOUGHT', '80'))  # Entry when RSI > 80 (very overbought)
+ATR_EXTENSION = float(os.getenv('ATR_EXTENSION', '2.5'))  # Price must be 2.5x ATR above EMA
 LOOKBACK_HIGH = int(os.getenv('LOOKBACK_HIGH', '10'))  # Bars to find recent high for SL
+MIN_RR = float(os.getenv('MIN_RR', '1.5'))  # Minimum R:R ratio required
+COOLDOWN_BARS = int(os.getenv('COOLDOWN_BARS', '20'))  # Bars between trades per coin
 
 # Fees (Bybit Futures)
 MAKER_FEE = 0.0002
@@ -116,9 +118,10 @@ def process_coin(args) -> List[MRTrade]:
 
 
 def run_backtest(symbol: str, df: pd.DataFrame) -> List[MRTrade]:
-    """Run mean reversion backtest"""
+    """Run mean reversion backtest - STRICT filtering"""
     trades = []
     active_trade = None
+    last_trade_idx = -COOLDOWN_BARS  # Allow first trade
 
     # Start after enough data for indicators
     start_idx = 50
@@ -147,9 +150,14 @@ def run_backtest(symbol: str, df: pd.DataFrame) -> List[MRTrade]:
                 t.pnl_pct = (gross - fees) * 100 * t.leverage
                 trades.append(t)
                 active_trade = None
+                last_trade_idx = idx  # Start cooldown
 
         # === LOOK FOR NEW ENTRY ===
         if active_trade:
+            continue
+
+        # Cooldown between trades
+        if idx - last_trade_idx < COOLDOWN_BARS:
             continue
 
         rsi = candle.get('rsi', 50)
@@ -159,7 +167,7 @@ def run_backtest(symbol: str, df: pd.DataFrame) -> List[MRTrade]:
         if pd.isna(rsi) or pd.isna(ema20) or pd.isna(atr) or atr == 0:
             continue
 
-        # === MEAN REVERSION SHORT CONDITIONS ===
+        # === MEAN REVERSION SHORT CONDITIONS (STRICT) ===
         # 1. RSI overbought
         if rsi <= RSI_OVERBOUGHT:
             continue
@@ -178,7 +186,7 @@ def run_backtest(symbol: str, df: pd.DataFrame) -> List[MRTrade]:
 
         # SL above recent high
         recent_high = df['high'].iloc[max(0, idx-LOOKBACK_HIGH):idx+1].max()
-        sl = recent_high * 1.002  # 0.2% buffer
+        sl = recent_high * 1.003  # 0.3% buffer
 
         # TP at EMA20 (mean reversion target)
         tp = ema20
@@ -187,9 +195,16 @@ def run_backtest(symbol: str, df: pd.DataFrame) -> List[MRTrade]:
         if tp >= entry:
             continue
 
+        # Check minimum R:R ratio
+        sl_distance = sl - entry
+        tp_distance = entry - tp
+        rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0
+        if rr_ratio < MIN_RR:
+            continue  # R:R too low - skip
+
         # Calculate leverage based on SL distance
         sl_pct = abs(sl - entry) / entry * 100
-        leverage = min(20, max(5, int(2 / sl_pct)))
+        leverage = min(15, max(5, int(2 / sl_pct)))  # Max 15x
 
         active_trade = MRTrade(
             symbol=symbol,
@@ -210,11 +225,11 @@ def run_mean_reversion(num_coins: int = 50, days: int = 30):
     from config.coins import get_top_n_coins
 
     print("=" * 80)
-    print("MEAN REVERSION SHORT BACKTEST")
+    print("MEAN REVERSION SHORT BACKTEST - STRICT")
     print("=" * 80)
     print(f"Coins: {num_coins} | Days: {days}")
-    print(f"RSI Overbought: > {RSI_OVERBOUGHT}")
-    print(f"ATR Extension: > {ATR_EXTENSION}x above EMA20")
+    print(f"RSI: > {RSI_OVERBOUGHT} | ATR Ext: > {ATR_EXTENSION}x | Min R:R: {MIN_RR}")
+    print(f"Cooldown: {COOLDOWN_BARS} bars between trades")
     print(f"SL: Above {LOOKBACK_HIGH}-bar high | TP: EMA20")
     print(f"Workers: {NUM_WORKERS} | Timeout: {TOTAL_TIMEOUT}s")
     print("=" * 80)
