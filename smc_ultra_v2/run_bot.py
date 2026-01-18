@@ -218,6 +218,21 @@ def run_variants():
     )
 
 
+def run_scalper():
+    """Run OB Scalper backtest with 1min precision"""
+    print("\n" + "=" * 60, flush=True)
+    print("OB SCALPER BACKTEST - 1min Precision", flush=True)
+    print("=" * 60, flush=True)
+    print(f"Testing {NUM_COINS} coins over {BACKTEST_DAYS} days", flush=True)
+
+    from ob_scalper import run_ob_scalper
+
+    run_ob_scalper(
+        num_coins=NUM_COINS,
+        days=BACKTEST_DAYS
+    )
+
+
 def main():
     print("\n[DEBUG] Starting main()", flush=True)
 
@@ -238,12 +253,15 @@ def main():
     elif MODE == 'variants':
         print("[DEBUG] Calling run_variants()...", flush=True)
         run_variants()
+    elif MODE == 'scalper':
+        print("[DEBUG] Calling run_scalper()...", flush=True)
+        run_scalper()
     elif MODE in ['paper', 'live']:
         print("[DEBUG] Calling run_paper_trading()", flush=True)
         run_paper_trading()
     else:
         print(f"Unknown mode: {MODE}")
-        print("Set BOT_MODE to: paper, live, backtest, optimize, compare, or variants")
+        print("Set BOT_MODE to: paper, live, backtest, optimize, compare, variants, or scalper")
 
 
 if __name__ == '__main__':
