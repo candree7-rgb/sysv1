@@ -233,6 +233,21 @@ def run_scalper():
     )
 
 
+def run_mean_reversion():
+    """Run Mean Reversion Short backtest"""
+    print("\n" + "=" * 60, flush=True)
+    print("MEAN REVERSION SHORT BACKTEST", flush=True)
+    print("=" * 60, flush=True)
+    print(f"Testing {NUM_COINS} coins over {BACKTEST_DAYS} days", flush=True)
+
+    from mean_reversion_short import run_mean_reversion as mr_backtest
+
+    mr_backtest(
+        num_coins=NUM_COINS,
+        days=BACKTEST_DAYS
+    )
+
+
 def main():
     print("\n[DEBUG] Starting main()", flush=True)
 
@@ -256,12 +271,15 @@ def main():
     elif MODE == 'scalper':
         print("[DEBUG] Calling run_scalper()...", flush=True)
         run_scalper()
+    elif MODE == 'mean_reversion':
+        print("[DEBUG] Calling run_mean_reversion()...", flush=True)
+        run_mean_reversion()
     elif MODE in ['paper', 'live']:
         print("[DEBUG] Calling run_paper_trading()", flush=True)
         run_paper_trading()
     else:
         print(f"Unknown mode: {MODE}")
-        print("Set BOT_MODE to: paper, live, backtest, optimize, compare, variants, or scalper")
+        print("Set BOT_MODE to: paper, live, backtest, optimize, compare, variants, scalper, or mean_reversion")
 
 
 if __name__ == '__main__':
