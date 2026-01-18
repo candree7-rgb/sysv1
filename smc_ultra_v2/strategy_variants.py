@@ -131,9 +131,10 @@ class VariantResult:
 
 
 # Winner config with MTF Alignment (FINAL STRATEGY)
+# Configurable via env: OB_MAX_AGE (default 100), OB_MIN_STRENGTH (default 0.8)
 WINNER_CONFIG = {
-    "ob_min_strength": 0.8,
-    "ob_max_age": 100,  # Increased from 50 - OBs need more time after detection_timestamp fix
+    "ob_min_strength": float(os.getenv('OB_MIN_STRENGTH', '0.8')),
+    "ob_max_age": int(os.getenv('OB_MAX_AGE', '100')),
     "sl_mult": 1.0,
     "tp_mult": 1.5,
     "use_ob_entry": True,
