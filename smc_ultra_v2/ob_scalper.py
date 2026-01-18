@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 NUM_WORKERS = int(os.getenv('NUM_WORKERS', str(min(4, cpu_count()))))
 TOTAL_TIMEOUT = int(os.getenv('TOTAL_TIMEOUT', '300'))
 OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.8'))
+OB_MIN_STRENGTH_SHORT = float(os.getenv('OB_MIN_STRENGTH_SHORT', '0.9'))  # Stricter for shorts
 OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '100'))  # in 5min candles
 RR_TARGET = float(os.getenv('RR_TARGET', '2.0'))  # TP = RR_TARGET * SL
 SL_BUFFER_PCT = float(os.getenv('SL_BUFFER_PCT', '0.05'))  # Buffer beyond OB edge
@@ -332,8 +333,9 @@ def run_backtest(
                 if ob.mitigation_timestamp and ob.mitigation_timestamp <= ts:
                     continue  # Already mitigated
 
-            # Filter by strength
-            if ob.strength < OB_MIN_STRENGTH:
+            # Filter by strength (stricter for shorts)
+            min_strength = OB_MIN_STRENGTH_SHORT if direction == 'short' else OB_MIN_STRENGTH
+            if ob.strength < min_strength:
                 continue
 
             # Filter by age (in 5min candles)
@@ -403,7 +405,7 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print("OB SCALPER BACKTEST - 1min Precision")
     print("=" * 80)
     print(f"Coins: {num_coins} | Days: {days}")
-    print(f"OB Strength: >= {OB_MIN_STRENGTH} | OB Max Age: {OB_MAX_AGE} candles")
+    print(f"OB Strength: Long >= {OB_MIN_STRENGTH}, Short >= {OB_MIN_STRENGTH_SHORT} | Max Age: {OB_MAX_AGE}")
     print(f"R:R Target: {RR_TARGET}:1 | SL Buffer: {SL_BUFFER_PCT}%")
     print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'}")
     print(f"Workers: {NUM_WORKERS} | Timeout: {TOTAL_TIMEOUT}s")
