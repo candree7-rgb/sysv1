@@ -45,6 +45,10 @@ USE_RSI_FILTER = os.getenv('USE_RSI_FILTER', 'false').lower() == 'true'  # OFF b
 # 4H MTF Filter - requires 4H trend alignment in addition to 1H
 USE_4H_MTF = os.getenv('USE_4H_MTF', 'true').lower() == 'true'  # ON by default
 
+# Trade Direction - allows testing long/short independently
+# Options: "both", "long", "short"
+TRADE_DIRECTION = os.getenv('TRADE_DIRECTION', 'both').lower()
+
 # Break-Even: Move SL to entry when price reaches X% toward TP
 # 80% is conservative - only triggers when almost at TP
 BE_THRESHOLD = float(os.getenv('BE_THRESHOLD', '0.8'))  # 80% toward TP (was 50%)
@@ -315,6 +319,13 @@ def run_backtest(
         # Direction based on 1H trend (now confirmed by 4H if enabled)
         direction = 'long' if h1_bullish else 'short'
 
+        # === DIRECTION FILTER ===
+        # Allows testing long/short independently
+        if TRADE_DIRECTION == 'long' and direction == 'short':
+            continue  # Skip shorts in long-only mode
+        if TRADE_DIRECTION == 'short' and direction == 'long':
+            continue  # Skip longs in short-only mode
+
         # === RSI FILTER ===
         # Confirms we're actually in a pullback (not chasing)
         if USE_RSI_FILTER:
@@ -422,6 +433,7 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print(f"Volume Filter: {'ON (>=' + str(MIN_VOLUME_RATIO) + 'x avg)' if USE_VOLUME_FILTER else 'OFF'}")
     print(f"R:R Target: {RR_TARGET}:1 | SL Buffer: {SL_BUFFER_PCT}%")
     print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'}")
+    print(f"Direction: {TRADE_DIRECTION.upper()}")
     print(f"Workers: {NUM_WORKERS} | Timeout: {TOTAL_TIMEOUT}s")
     print("=" * 80)
 
