@@ -133,7 +133,7 @@ class VariantResult:
 # Winner config with MTF Alignment (FINAL STRATEGY)
 WINNER_CONFIG = {
     "ob_min_strength": 0.8,
-    "ob_max_age": 50,
+    "ob_max_age": 100,  # Increased from 50 - OBs need more time after detection_timestamp fix
     "sl_mult": 1.0,
     "tp_mult": 1.5,
     "use_ob_entry": True,
