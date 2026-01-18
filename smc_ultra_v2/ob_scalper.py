@@ -208,32 +208,18 @@ def run_backtest(
             continue
         h1_candle = h1_candles.iloc[-1]
 
-        # Determine 1H trend
+        # Determine 1H trend (this is the ONLY MTF filter now)
+        # We removed 5min trend requirement because OB retest happens during pullbacks
+        # and during pullbacks, 5min EMAs won't be aligned (which is expected!)
         h1_bullish = h1_candle['close'] > h1_candle['ema20'] > h1_candle['ema50']
         h1_bearish = h1_candle['close'] < h1_candle['ema20'] < h1_candle['ema50']
 
         if not h1_bullish and not h1_bearish:
-            continue  # No clear MTF trend
+            continue  # No clear 1H trend - skip
 
-        # Find 5min candle for trend check
-        m5_candles = df_5m[df_5m['timestamp'] <= ts_5m]
-        if len(m5_candles) == 0:
-            continue
-        m5_candle = m5_candles.iloc[-1]
-
-        # 5min trend must align with 1H
-        m5_bullish = m5_candle['close'] > m5_candle['ema20'] > m5_candle['ema50']
-        m5_bearish = m5_candle['close'] < m5_candle['ema20'] < m5_candle['ema50']
-
-        # Determine direction based on aligned trend
-        direction = None
-        if h1_bullish and m5_bullish:
-            direction = 'long'
-        elif h1_bearish and m5_bearish:
-            direction = 'short'
-
-        if not direction:
-            continue
+        # Direction based on 1H trend only
+        # The OB type (bullish/bearish) provides additional confirmation
+        direction = 'long' if h1_bullish else 'short'
 
         # === FIND VALID OB ===
         current_price = candle['close']
