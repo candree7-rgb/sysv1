@@ -4,8 +4,13 @@ SMC Ultra V2 - Coin Configuration
 Dynamically fetches coins from Bybit Futures API
 """
 
+import requests
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+# Disable SSL warnings
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Cache for dynamic coin list
 _DYNAMIC_COINS_CACHE = None
@@ -23,6 +28,8 @@ def fetch_bybit_futures_symbols(limit: int = 200) -> List[str]:
     """
     Fetch actual linear perpetual symbols from Bybit API.
     Returns top coins sorted by 24h volume.
+
+    Uses direct requests with strict 15s timeout to avoid hanging.
     """
     global _DYNAMIC_COINS_CACHE
 
@@ -30,13 +37,15 @@ def fetch_bybit_futures_symbols(limit: int = 200) -> List[str]:
         return _DYNAMIC_COINS_CACHE[:limit]
 
     try:
-        from pybit.unified_trading import HTTP
-        client = HTTP()
+        # Use direct requests with timeout instead of pybit (which can hang indefinitely)
+        url = "https://api.bybit.com/v5/market/tickers"
+        params = {"category": "linear"}
 
-        response = client.get_tickers(category="linear")
+        response = requests.get(url, params=params, timeout=15, verify=False)
+        data = response.json()
 
-        if response['retCode'] != 0:
-            print(f"Warning: Could not fetch Bybit symbols: {response['retMsg']}")
+        if data.get('retCode') != 0:
+            print(f"Warning: Could not fetch Bybit symbols: {data.get('retMsg')}")
             return _get_fallback_coins()[:limit]
 
         # Filter USDT perpetuals and sort by volume
@@ -45,7 +54,7 @@ def fetch_bybit_futures_symbols(limit: int = 200) -> List[str]:
                 'symbol': t['symbol'],
                 'volume': float(t['turnover24h'])
             }
-            for t in response['result']['list']
+            for t in data['result']['list']
             if t['symbol'].endswith('USDT') and not t['symbol'].endswith('USDTUSDT')
         ]
 
@@ -55,6 +64,9 @@ def fetch_bybit_futures_symbols(limit: int = 200) -> List[str]:
         print(f"Fetched {len(_DYNAMIC_COINS_CACHE)} valid futures symbols from Bybit")
         return _DYNAMIC_COINS_CACHE[:limit]
 
+    except requests.exceptions.Timeout:
+        print(f"Warning: Bybit API timeout, using fallback coins")
+        return _get_fallback_coins()[:limit]
     except Exception as e:
         print(f"Warning: Could not fetch Bybit symbols: {e}")
         return _get_fallback_coins()[:limit]
