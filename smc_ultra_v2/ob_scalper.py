@@ -45,6 +45,9 @@ USE_RSI_FILTER = os.getenv('USE_RSI_FILTER', 'false').lower() == 'true'  # OFF b
 # 4H MTF Filter - requires 4H trend alignment in addition to 1H
 USE_4H_MTF = os.getenv('USE_4H_MTF', 'true').lower() == 'true'  # ON by default
 
+# Daily MTF Filter for Shorts - requires Daily bearish for shorts (stricter)
+USE_DAILY_FOR_SHORTS = os.getenv('USE_DAILY_FOR_SHORTS', 'true').lower() == 'true'  # ON by default
+
 # Trade Direction - allows testing long/short independently
 # Options: "both", "long", "short"
 TRADE_DIRECTION = os.getenv('TRADE_DIRECTION', 'both').lower()
@@ -155,12 +158,21 @@ def process_coin(args) -> List[ScalpTrade]:
             if df_4h is None or len(df_4h) < 20:
                 df_4h = None  # Fallback: skip 4H filter for this coin
 
+        # Load Daily data for short filter
+        df_daily = None
+        if USE_DAILY_FOR_SHORTS:
+            df_daily = dl.load_or_download(symbol, "D", days + 90)
+            if df_daily is None or len(df_daily) < 20:
+                df_daily = None
+
         # Add indicators (RSI on 1min for pullback confirmation)
         df_5m = calculate_indicators(df_5m)
         df_1h = calculate_indicators(df_1h)
         df_1m = calculate_indicators(df_1m, include_rsi=True)  # RSI for entry filter
         if df_4h is not None:
             df_4h = calculate_indicators(df_4h)
+        if df_daily is not None:
+            df_daily = calculate_indicators(df_daily)
 
         # Add volume SMA for OB volume filter
         if 'volume' in df_5m.columns:
@@ -175,7 +187,7 @@ def process_coin(args) -> List[ScalpTrade]:
             return []
 
         # Run backtest
-        trades = run_backtest(symbol, df_5m, df_1m, df_1h, obs, df_4h)
+        trades = run_backtest(symbol, df_5m, df_1m, df_1h, obs, df_4h, df_daily)
 
     except Exception as e:
         print(f"      [Error] {symbol}: {str(e)[:50]}", flush=True)
@@ -190,7 +202,8 @@ def run_backtest(
     df_1m: pd.DataFrame,
     df_1h: pd.DataFrame,
     obs: list,
-    df_4h: pd.DataFrame = None
+    df_4h: pd.DataFrame = None,
+    df_daily: pd.DataFrame = None
 ) -> List[ScalpTrade]:
     """
     Run backtest for a single coin.
@@ -319,6 +332,17 @@ def run_backtest(
         # Direction based on 1H trend (now confirmed by 4H if enabled)
         direction = 'long' if h1_bullish else 'short'
 
+        # === DAILY MTF FILTER FOR SHORTS ===
+        # Shorts require Daily timeframe to also be bearish (stricter filter)
+        if USE_DAILY_FOR_SHORTS and direction == 'short' and df_daily is not None:
+            ts_daily = ts.floor('D')
+            daily_candles = df_daily[df_daily['timestamp'] <= ts_daily - pd.Timedelta(days=1)]
+            if len(daily_candles) > 0:
+                daily_candle = daily_candles.iloc[-1]
+                daily_bearish = daily_candle['close'] < daily_candle['ema20'] < daily_candle['ema50']
+                if not daily_bearish:
+                    continue  # Daily not bearish - skip short
+
         # === DIRECTION FILTER ===
         # Allows testing long/short independently
         if TRADE_DIRECTION == 'long' and direction == 'short':
@@ -432,7 +456,7 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print(f"OB Strength: Long >= {OB_MIN_STRENGTH}, Short >= {OB_MIN_STRENGTH_SHORT} | Max Age: {OB_MAX_AGE}")
     print(f"Volume Filter: {'ON (>=' + str(MIN_VOLUME_RATIO) + 'x avg)' if USE_VOLUME_FILTER else 'OFF'}")
     print(f"R:R Target: {RR_TARGET}:1 | SL Buffer: {SL_BUFFER_PCT}%")
-    print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'}")
+    print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'} + {'Daily(shorts)' if USE_DAILY_FOR_SHORTS else ''}")
     print(f"Direction: {TRADE_DIRECTION.upper()}")
     print(f"Workers: {NUM_WORKERS} | Timeout: {TOTAL_TIMEOUT}s")
     print("=" * 80)
