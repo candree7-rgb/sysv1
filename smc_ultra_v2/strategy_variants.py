@@ -307,10 +307,14 @@ def process_coin_for_variant(args) -> List[Trade]:
                 continue
 
             # Get active OBs (with look-ahead bias fix!)
+            # CRITICAL: Use detection_timestamp (impulse time), NOT timestamp (OB candle time)
+            # We can only know about an OB AFTER the impulse confirms it!
             active_obs = []
             for ob in obs:
-                if ob.timestamp >= ts:
-                    continue
+                # Use detection_timestamp if available, fallback to timestamp for old OBs
+                ob_known_at = ob.detection_timestamp if ob.detection_timestamp is not None else ob.timestamp
+                if ob_known_at >= ts:
+                    continue  # We don't know about this OB yet!
                 if not ob.is_mitigated:
                     active_obs.append(ob)
                 elif ob.mitigation_timestamp is not None and ob.mitigation_timestamp > ts:

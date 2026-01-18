@@ -21,10 +21,14 @@ class OrderBlock:
     """Represents an Order Block zone"""
     top: float
     bottom: float
-    timestamp: pd.Timestamp
+    timestamp: pd.Timestamp  # When the OB candle formed
     is_bullish: bool
     is_mitigated: bool = False
     mitigation_timestamp: Optional[pd.Timestamp] = None
+
+    # CRITICAL: When we actually KNOW about this OB (impulse confirmation)
+    # This prevents look-ahead bias - we can only trade OBs after this time!
+    detection_timestamp: Optional[pd.Timestamp] = None
 
     # Quality metrics
     strength: float = 1.0  # 0-1, based on impulse strength
@@ -155,11 +159,15 @@ class OrderBlockDetector:
                 elif 'volume' in df.columns and 'volume_sma' in df.columns:
                     volume_ratio = candle['volume'] / df['volume_sma'].iloc[i]
 
+                # Get impulse candle timestamp for detection_timestamp
+                impulse_ts = impulse_candle['timestamp'] if 'timestamp' in impulse_candle else df.index[impulse_idx]
+
                 return OrderBlock(
                     top=candle['high'],
                     bottom=candle['low'],
                     timestamp=candle['timestamp'] if 'timestamp' in candle else df.index[i],
                     is_bullish=True,
+                    detection_timestamp=impulse_ts,  # When we KNOW about this OB!
                     strength=strength,
                     volume_ratio=volume_ratio,
                     impulse_size=impulse_size / atr.iloc[impulse_idx],
@@ -178,11 +186,15 @@ class OrderBlockDetector:
                 elif 'volume' in df.columns and 'volume_sma' in df.columns:
                     volume_ratio = candle['volume'] / df['volume_sma'].iloc[i]
 
+                # Get impulse candle timestamp for detection_timestamp
+                impulse_ts = impulse_candle['timestamp'] if 'timestamp' in impulse_candle else df.index[impulse_idx]
+
                 return OrderBlock(
                     top=candle['high'],
                     bottom=candle['low'],
                     timestamp=candle['timestamp'] if 'timestamp' in candle else df.index[i],
                     is_bullish=False,
+                    detection_timestamp=impulse_ts,  # When we KNOW about this OB!
                     strength=strength,
                     volume_ratio=volume_ratio,
                     impulse_size=impulse_size / atr.iloc[impulse_idx],
