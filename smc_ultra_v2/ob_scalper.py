@@ -32,14 +32,15 @@ OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '100'))  # in 5min candles
 RR_TARGET = float(os.getenv('RR_TARGET', '2.0'))  # TP = RR_TARGET * SL
 SL_BUFFER_PCT = float(os.getenv('SL_BUFFER_PCT', '0.05'))  # Buffer beyond OB edge
 
-# RSI Filter - confirms we're in a pullback
-RSI_LONG_MAX = int(os.getenv('RSI_LONG_MAX', '45'))   # Long only when RSI < 45 (oversold/pullback)
-RSI_SHORT_MIN = int(os.getenv('RSI_SHORT_MIN', '55')) # Short only when RSI > 55 (overbought/pullback)
-USE_RSI_FILTER = os.getenv('USE_RSI_FILTER', 'true').lower() == 'true'
+# RSI Filter - DISABLED by default (too restrictive, filters good trades)
+RSI_LONG_MAX = int(os.getenv('RSI_LONG_MAX', '45'))
+RSI_SHORT_MIN = int(os.getenv('RSI_SHORT_MIN', '55'))
+USE_RSI_FILTER = os.getenv('USE_RSI_FILTER', 'false').lower() == 'true'  # OFF by default
 
 # Break-Even: Move SL to entry when price reaches X% toward TP
-BE_THRESHOLD = float(os.getenv('BE_THRESHOLD', '0.5'))  # 50% toward TP
-USE_BE = os.getenv('USE_BE', 'true').lower() == 'true'
+# 80% is conservative - only triggers when almost at TP
+BE_THRESHOLD = float(os.getenv('BE_THRESHOLD', '0.8'))  # 80% toward TP (was 50%)
+USE_BE = os.getenv('USE_BE', 'false').lower() == 'true'  # OFF by default
 
 # Fees (Bybit Futures)
 MAKER_FEE = 0.0002  # 0.02%
