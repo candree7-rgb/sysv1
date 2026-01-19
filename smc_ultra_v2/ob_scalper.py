@@ -352,7 +352,8 @@ def run_backtest(
                     partial_gross = (partial_exit_price - t.entry_price) / t.entry_price
                 else:
                     partial_exit_price = t.entry_price - (tp_dist * PARTIAL_TP_LEVEL)
-                    partial_gross = (t.entry_price - partial_exit_price) / t.entry_price
+                    # Simplified: partial_gross = (tp_dist * PARTIAL_TP_LEVEL) / entry
+                    partial_gross = (tp_dist * PARTIAL_TP_LEVEL) / t.entry_price
 
                 # Lock in partial profit
                 # Entry fee was paid on full position, only exit fee for partial
@@ -362,7 +363,7 @@ def run_backtest(
 
                 # DEBUG: Print first few partial calculations
                 if len(trades) < 3:
-                    print(f"    [DEBUG Partial] {symbol}: sl_dist={sl_dist:.6f}, tp_dist={tp_dist:.6f}, entry={t.entry_price:.4f}, gross={partial_gross:.6f}, partial_pnl={t.partial_pnl:.2f}%")
+                    print(f"    [DEBUG Partial] {symbol}: tp_dist={tp_dist:.6f}, LEVEL={PARTIAL_TP_LEVEL}, entry={t.entry_price:.4f}, gross={partial_gross:.6f}, partial_pnl={t.partial_pnl:.2f}%")
 
                 # Move SL to lock in tiny profit for remaining position
                 # Long: SL above entry (exit higher = profit)
