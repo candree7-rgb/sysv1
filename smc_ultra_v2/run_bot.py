@@ -21,9 +21,10 @@ def _silent_thread_exception(args):
 threading.excepthook = _silent_thread_exception
 
 # Config from env
-MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest
+MODE = os.getenv('BOT_MODE', 'paper')  # paper, live, backtest, scalper_live
 NUM_COINS = int(os.getenv('BOT_COINS', '200'))  # Number of coins to trade (200 for better sample)
 USE_TESTNET = os.getenv('USE_TESTNET', 'false').lower() == 'true'  # true = testnet.bybit.com, false = bybit.com demo
+PAPER_MODE = os.getenv('PAPER_MODE', 'true').lower() == 'true'  # true = log signals only, false = place real orders
 MIN_CONFIDENCE = int(os.getenv('MIN_CONFIDENCE', '60'))  # Minimum confidence for trades
 # Hedged exposure: separate limits for longs and shorts
 MAX_LONGS = int(os.getenv('MAX_LONGS', '2'))    # Max 2 long trades
@@ -241,6 +242,9 @@ def run_scalper_live():
     print("\n" + "=" * 60, flush=True)
     print("OB SCALPER LIVE - 1:1 Backtest Logic", flush=True)
     print("=" * 60, flush=True)
+    print(f"Mode: {'PAPER (no real orders)' if PAPER_MODE else 'LIVE (real orders!)'}")
+    print(f"Network: {'TESTNET' if USE_TESTNET else 'MAINNET'}")
+    print("=" * 60, flush=True)
 
     from config import config
     config.api.testnet = USE_TESTNET
@@ -302,8 +306,9 @@ def run_scalper_live():
                 print_signal(signal)
 
                 # Place order (paper mode just logs)
-                if MODE == 'paper':
-                    print(f"  [PAPER] Would place {signal.direction} order for {signal.symbol}")
+                if PAPER_MODE:
+                    print(f"  [PAPER] Would place {signal.direction.upper()} @ {signal.entry_price:.4f}")
+                    print(f"          SL: {signal.sl_price:.4f}, TP: {signal.tp_price:.4f}, Lev: {signal.leverage}x")
                 else:
                     # Real order placement
                     try:
