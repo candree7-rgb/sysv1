@@ -202,7 +202,8 @@ def process_coin(args) -> List[ScalpTrade]:
 
         # Apply SKIP_DAYS filter: only keep data in target date range
         if SKIP_DAYS > 0:
-            now = pd.Timestamp.now(tz='UTC')
+            # Use timezone-naive timestamp to match data format
+            now = pd.Timestamp.now()
             # End date: SKIP_DAYS ago | Start date: SKIP_DAYS + days ago
             end_date = now - pd.Timedelta(days=SKIP_DAYS)
             start_date = now - pd.Timedelta(days=SKIP_DAYS + days)
