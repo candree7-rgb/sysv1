@@ -210,13 +210,15 @@ def process_coin(args) -> List[ScalpTrade]:
 
             # DEBUG: Show first coin's date range
             if symbol.startswith('BTC') or symbol.startswith('ETH'):
-                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: {start_date.date()} to {end_date.date()}, {len(df_1m)} candles before filter")
+                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: target {start_date.date()} to {end_date.date()}")
+                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: df_1m range: {df_1m['timestamp'].min()} to {df_1m['timestamp'].max()}")
+                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: df_1h range: {df_1h['timestamp'].min()} to {df_1h['timestamp'].max()}")
 
             # Filter 1min data to target range (this is what we iterate through)
             df_1m = df_1m[(df_1m['timestamp'] >= start_date) & (df_1m['timestamp'] <= end_date)]
 
             if symbol.startswith('BTC') or symbol.startswith('ETH'):
-                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: {len(df_1m)} candles after filter")
+                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: {len(df_1m)} 1m candles in range")
 
             if len(df_1m) < 500:
                 return []  # Not enough data in range
@@ -440,6 +442,9 @@ def run_backtest(
         # Find 1H candle (must be COMPLETED, so use previous)
         h1_candles = df_1h[df_1h['timestamp'] <= ts_1h - pd.Timedelta(hours=1)]
         if len(h1_candles) == 0:
+            # DEBUG: Show why no 1H data found (first occurrence only)
+            if SKIP_DAYS > 0 and idx == start_idx:
+                print(f"    [DEBUG MTF] {symbol}: ts_1h={ts_1h}, df_1h range: {df_1h['timestamp'].min()} to {df_1h['timestamp'].max()}")
             continue
         h1_candle = h1_candles.iloc[-1]
 
