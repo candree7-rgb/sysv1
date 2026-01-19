@@ -325,12 +325,13 @@ def run_backtest(
                 t.partial_pnl = (partial_gross - partial_fees) * 100 * t.leverage * PARTIAL_SIZE
                 t.partial_closed = True
 
-                # Move SL to break-even for remaining position (de-risk)
-                # Add small buffer to avoid immediate BE exit from spread/noise
+                # Move SL to lock in tiny profit for remaining position
+                # Long: SL above entry (exit higher = profit)
+                # Short: SL below entry (exit lower = profit)
                 if t.direction == 'long':
-                    t.current_sl = t.entry_price * 0.999  # Tiny buffer below entry
+                    t.current_sl = t.entry_price * 1.001  # 0.1% above entry = tiny profit
                 else:
-                    t.current_sl = t.entry_price * 1.001  # Tiny buffer above entry
+                    t.current_sl = t.entry_price * 0.999  # 0.1% below entry = tiny profit
                 t.be_triggered = True
 
             # === TIME EXIT ===
