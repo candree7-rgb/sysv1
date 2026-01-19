@@ -532,6 +532,7 @@ def run_backtest(
         dbg_ob_checked = 0
         dbg_ob_future_local = 0
         dbg_ob_direction_local = 0
+        dbg_ob_age_local = 0
 
         for ob in obs:
             dbg_ob_checked += 1
@@ -549,6 +550,7 @@ def run_backtest(
             # Filter by strength (stricter for shorts)
             min_strength = OB_MIN_STRENGTH_SHORT if direction == 'short' else OB_MIN_STRENGTH
             if ob.strength < min_strength:
+                dbg_ob_strength += 1
                 continue
 
             # Filter by volume (confirms institutional interest)
@@ -559,6 +561,7 @@ def run_backtest(
             # Filter by age (in 5min candles)
             ob_age = (ts - ob.timestamp).total_seconds() / 300  # 5min = 300sec
             if ob_age > OB_MAX_AGE:
+                dbg_ob_age_local += 1
                 continue
 
             # Check direction matches
@@ -584,6 +587,7 @@ def run_backtest(
         # Track OB filter stats
         dbg_ob_future += dbg_ob_future_local
         dbg_ob_direction += dbg_ob_direction_local
+        dbg_ob_age += dbg_ob_age_local
 
         if not matching_ob:
             dbg_ob_no_touch += 1
@@ -622,9 +626,16 @@ def run_backtest(
     # DEBUG: Print filter stats for SKIP_DAYS troubleshooting
     if SKIP_DAYS > 0 and (symbol.startswith('BTC') or symbol.startswith('ETH')):
         print(f"    [DEBUG {symbol}] Candles: {len(df_1m)}, OBs: {len(obs)}")
+        print(f"    [DEBUG {symbol}] 1m range: {df_1m['timestamp'].min()} to {df_1m['timestamp'].max()}")
+        # Show first few OBs timestamps
+        if len(obs) > 0:
+            sample_obs = obs[:3]
+            for i, ob in enumerate(sample_obs):
+                det_ts = ob.detection_timestamp if ob.detection_timestamp else "None"
+                print(f"    [DEBUG {symbol}] OB[{i}]: ts={ob.timestamp}, det_ts={det_ts}, bullish={ob.is_bullish}")
         print(f"    [DEBUG {symbol}] no_h1_data={dbg_no_h1_data}, h1_no_trend={dbg_h1_no_trend}, mtf_checks={dbg_mtf_checks}")
         print(f"    [DEBUG {symbol}] h4_not_aligned={dbg_h4_not_aligned}, direction_filter={dbg_direction_filter}")
-        print(f"    [DEBUG {symbol}] OB: future={dbg_ob_future}, wrong_dir={dbg_ob_direction}, no_touch={dbg_ob_no_touch}")
+        print(f"    [DEBUG {symbol}] OB: future={dbg_ob_future}, strength={dbg_ob_strength}, age={dbg_ob_age}, wrong_dir={dbg_ob_direction}, no_touch={dbg_ob_no_touch}")
         print(f"    [DEBUG {symbol}] Trades found: {len(trades)}")
 
     return trades
