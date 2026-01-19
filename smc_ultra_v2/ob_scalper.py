@@ -280,6 +280,20 @@ def run_backtest(
     trades = []
     active_trade = None
 
+    # DEBUG counters for SKIP_DAYS troubleshooting
+    dbg_no_h1_data = 0
+    dbg_h1_not_bullish = 0
+    dbg_h1_no_trend = 0
+    dbg_h4_not_aligned = 0
+    dbg_direction_filter = 0
+    dbg_no_obs = 0
+    dbg_ob_future = 0
+    dbg_ob_strength = 0
+    dbg_ob_age = 0
+    dbg_ob_direction = 0
+    dbg_ob_no_touch = 0
+    dbg_mtf_checks = 0
+
     # Create timestamp index for fast lookup
     df_5m_indexed = df_5m.set_index('timestamp')
     df_1h_indexed = df_1h.set_index('timestamp')
@@ -446,9 +460,7 @@ def run_backtest(
         # Find 1H candle (must be COMPLETED, so use previous)
         h1_candles = df_1h[df_1h['timestamp'] <= ts_1h - pd.Timedelta(hours=1)]
         if len(h1_candles) == 0:
-            # DEBUG: Show why no 1H data found (first occurrence only)
-            if SKIP_DAYS > 0 and idx == start_idx:
-                print(f"    [DEBUG MTF] {symbol}: ts_1h={ts_1h}, df_1h range: {df_1h['timestamp'].min()} to {df_1h['timestamp'].max()}")
+            dbg_no_h1_data += 1
             continue
         h1_candle = h1_candles.iloc[-1]
 
@@ -457,7 +469,10 @@ def run_backtest(
         h1_bearish = h1_candle['close'] < h1_candle['ema20'] < h1_candle['ema50']
 
         if not h1_bullish and not h1_bearish:
+            dbg_h1_no_trend += 1
             continue  # No clear 1H trend - skip
+
+        dbg_mtf_checks += 1  # Count how many times we have a clear 1H trend
 
         # === 4H MTF FILTER ===
         # Requires 4H trend to align with 1H for higher probability trades
@@ -471,8 +486,10 @@ def run_backtest(
 
                 # Skip if 4H doesn't confirm 1H direction
                 if h1_bullish and not h4_bullish:
+                    dbg_h4_not_aligned += 1
                     continue  # 1H bullish but 4H not confirming
                 if h1_bearish and not h4_bearish:
+                    dbg_h4_not_aligned += 1
                     continue  # 1H bearish but 4H not confirming
 
         # Direction based on 1H trend (now confirmed by 4H if enabled)
@@ -492,8 +509,10 @@ def run_backtest(
         # === DIRECTION FILTER ===
         # Allows testing long/short independently
         if TRADE_DIRECTION == 'long' and direction == 'short':
+            dbg_direction_filter += 1
             continue  # Skip shorts in long-only mode
         if TRADE_DIRECTION == 'short' and direction == 'long':
+            dbg_direction_filter += 1
             continue  # Skip longs in short-only mode
 
         # === RSI FILTER ===
@@ -587,6 +606,13 @@ def run_backtest(
             ob_bottom=ob.bottom,
             leverage=leverage
         )
+
+    # DEBUG: Print filter stats for SKIP_DAYS troubleshooting
+    if SKIP_DAYS > 0 and (symbol.startswith('BTC') or symbol.startswith('ETH')):
+        print(f"    [DEBUG {symbol}] Candles: {len(df_1m)}, OBs: {len(obs)}")
+        print(f"    [DEBUG {symbol}] no_h1_data={dbg_no_h1_data}, h1_no_trend={dbg_h1_no_trend}, mtf_checks={dbg_mtf_checks}")
+        print(f"    [DEBUG {symbol}] h4_not_aligned={dbg_h4_not_aligned}, direction_filter={dbg_direction_filter}")
+        print(f"    [DEBUG {symbol}] Trades found: {len(trades)}")
 
     return trades
 
