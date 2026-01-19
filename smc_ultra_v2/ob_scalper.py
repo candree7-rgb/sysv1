@@ -76,6 +76,12 @@ USE_PARTIAL_TP = os.getenv('USE_PARTIAL_TP', 'false').lower() == 'true'
 PARTIAL_TP_LEVEL = float(os.getenv('PARTIAL_TP_LEVEL', '0.5'))  # Close partial at 50% toward TP
 PARTIAL_SIZE = float(os.getenv('PARTIAL_SIZE', '0.5'))  # Close 50% of position
 
+# Date Range: Skip recent days for historical testing
+# DAYS=30 SKIP_DAYS=0  → Last 30 days (default)
+# DAYS=30 SKIP_DAYS=30 → Days 30-60 ago
+# DAYS=30 SKIP_DAYS=60 → Days 60-90 ago
+SKIP_DAYS = int(os.getenv('SKIP_DAYS', '0'))
+
 # Fees (Bybit Futures)
 MAKER_FEE = 0.0002  # 0.02%
 TAKER_FEE = 0.00055  # 0.055%
@@ -163,32 +169,48 @@ def process_coin(args) -> List[ScalpTrade]:
         dl = BybitDataDownloader()
         ob_det = OrderBlockDetector(min_strength=0.5)  # Detect all, filter later
 
-        # Load data
-        df_5m = dl.load_or_download(symbol, "5", days + 10)
+        # Calculate date range with SKIP_DAYS
+        # SKIP_DAYS=0: last N days | SKIP_DAYS=30: days 30-60 ago, etc.
+        total_days_needed = days + SKIP_DAYS
+
+        # Load data (extra buffer for indicators and OB detection)
+        df_5m = dl.load_or_download(symbol, "5", total_days_needed + 10)
         if df_5m is None or len(df_5m) < 200:
             return []
 
-        df_1m = dl.load_or_download(symbol, "1", days + 5)
+        df_1m = dl.load_or_download(symbol, "1", total_days_needed + 5)
         if df_1m is None or len(df_1m) < 500:
             return []
 
-        df_1h = dl.load_or_download(symbol, "60", days + 30)
+        df_1h = dl.load_or_download(symbol, "60", total_days_needed + 30)
         if df_1h is None or len(df_1h) < 50:
             return []
 
         # Load 4H data if MTF filter enabled
         df_4h = None
         if USE_4H_MTF:
-            df_4h = dl.load_or_download(symbol, "240", days + 60)
+            df_4h = dl.load_or_download(symbol, "240", total_days_needed + 60)
             if df_4h is None or len(df_4h) < 20:
                 df_4h = None  # Fallback: skip 4H filter for this coin
 
         # Load Daily data for short filter
         df_daily = None
         if USE_DAILY_FOR_SHORTS:
-            df_daily = dl.load_or_download(symbol, "D", days + 90)
+            df_daily = dl.load_or_download(symbol, "D", total_days_needed + 90)
             if df_daily is None or len(df_daily) < 20:
                 df_daily = None
+
+        # Apply SKIP_DAYS filter: only keep data in target date range
+        if SKIP_DAYS > 0:
+            now = pd.Timestamp.now(tz='UTC')
+            # End date: SKIP_DAYS ago | Start date: SKIP_DAYS + days ago
+            end_date = now - pd.Timedelta(days=SKIP_DAYS)
+            start_date = now - pd.Timedelta(days=SKIP_DAYS + days)
+
+            # Filter 1min data to target range (this is what we iterate through)
+            df_1m = df_1m[(df_1m['timestamp'] >= start_date) & (df_1m['timestamp'] <= end_date)]
+            if len(df_1m) < 500:
+                return []  # Not enough data in range
 
         # Add indicators (RSI on 1min for pullback confirmation)
         df_5m = calculate_indicators(df_5m)
@@ -325,6 +347,10 @@ def run_backtest(
                 t.partial_pnl = (partial_gross - partial_fees) * 100 * t.leverage * PARTIAL_SIZE
                 t.partial_closed = True
 
+                # DEBUG: Print first few partial calculations
+                if len(trades) < 3:
+                    print(f"    [DEBUG Partial] {symbol}: gross={partial_gross:.4f}, fees={partial_fees:.5f}, lev={t.leverage}, partial_pnl={t.partial_pnl:.2f}%")
+
                 # Move SL to lock in tiny profit for remaining position
                 # Long: SL above entry (exit higher = profit)
                 # Short: SL below entry (exit lower = profit)
@@ -376,6 +402,10 @@ def run_backtest(
                     remaining_pnl = (gross - remaining_fees) * 100 * t.leverage * (1 - PARTIAL_SIZE)
                     # Total = locked partial profit + remaining position result
                     t.pnl_pct = t.partial_pnl + remaining_pnl
+
+                    # DEBUG: Print first few combined calculations
+                    if len(trades) < 3:
+                        print(f"    [DEBUG Exit] {symbol}: exit={t.exit_reason}, gross={gross:.5f}, partial_pnl={t.partial_pnl:.2f}%, remaining={remaining_pnl:.2f}%, total={t.pnl_pct:.2f}%")
                 else:
                     t.pnl_pct = (gross - fees) * 100 * t.leverage
 
@@ -545,7 +575,11 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print("=" * 80)
     print("OB SCALPER BACKTEST - 1min Precision")
     print("=" * 80)
-    print(f"Coins: {num_coins} | Days: {days}")
+    # Show date range info
+    if SKIP_DAYS > 0:
+        print(f"Coins: {num_coins} | Days: {days} (skipping last {SKIP_DAYS} days → testing days {SKIP_DAYS}-{SKIP_DAYS+days})")
+    else:
+        print(f"Coins: {num_coins} | Days: {days}")
     print(f"OB Strength: Long >= {OB_MIN_STRENGTH}, Short >= {OB_MIN_STRENGTH_SHORT} | Max Age: {OB_MAX_AGE}")
     print(f"Volume Filter: {'ON (>=' + str(MIN_VOLUME_RATIO) + 'x avg)' if USE_VOLUME_FILTER else 'OFF'}")
     print(f"R:R Target: {RR_TARGET}:1 | SL Buffer: {SL_BUFFER_PCT}%")
