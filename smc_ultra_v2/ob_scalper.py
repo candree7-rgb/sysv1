@@ -71,6 +71,11 @@ MAX_BARS = int(os.getenv('MAX_BARS', '60'))  # Max 60 1min bars = 1 hour
 # Option 3: Max Leverage Cap
 MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '20'))  # Default 20, set to 10 for lower DD
 
+# Option 4: Partial Take Profit (lock in profits early, let remainder run)
+USE_PARTIAL_TP = os.getenv('USE_PARTIAL_TP', 'false').lower() == 'true'
+PARTIAL_TP_LEVEL = float(os.getenv('PARTIAL_TP_LEVEL', '0.5'))  # Close partial at 50% toward TP
+PARTIAL_SIZE = float(os.getenv('PARTIAL_SIZE', '0.5'))  # Close 50% of position
+
 # Fees (Bybit Futures)
 MAKER_FEE = 0.0002  # 0.02%
 TAKER_FEE = 0.00055  # 0.055%
@@ -98,6 +103,10 @@ class ScalpTrade:
     max_profit_price: float = None  # Peak price reached
     trail_level: int = 0  # Current trailing level (0=none, 1=BE, 2+=profit locked)
     bars_in_trade: int = 0  # Bars since entry (for time exit)
+
+    # Partial TP tracking
+    partial_closed: bool = False  # Has partial TP been taken?
+    partial_pnl: float = 0.0  # PnL from partial close (locked in)
 
     # Results (filled after exit)
     exit_price: float = None
@@ -290,6 +299,26 @@ def run_backtest(
                             t.be_triggered = True
                             t.current_sl = t.entry_price
 
+            # === PARTIAL TAKE PROFIT ===
+            # Close partial position at intermediate target, let rest run
+            if USE_PARTIAL_TP and not t.partial_closed and profit_pct >= PARTIAL_TP_LEVEL:
+                # Calculate PnL for the partial close
+                if t.direction == 'long':
+                    partial_exit_price = t.entry_price + (tp_distance * PARTIAL_TP_LEVEL)
+                    partial_gross = (partial_exit_price - t.entry_price) / t.entry_price
+                else:
+                    partial_exit_price = t.entry_price - (tp_distance * PARTIAL_TP_LEVEL)
+                    partial_gross = (t.entry_price - partial_exit_price) / t.entry_price
+
+                # Lock in partial profit (with fees for this portion)
+                partial_fees = MAKER_FEE + TAKER_FEE  # Fees on partial close
+                t.partial_pnl = (partial_gross - partial_fees) * 100 * t.leverage * PARTIAL_SIZE
+                t.partial_closed = True
+
+                # Move SL to break-even for remaining position (de-risk)
+                t.current_sl = t.entry_price
+                t.be_triggered = True
+
             # === TIME EXIT ===
             if USE_TIME_EXIT and t.bars_in_trade >= MAX_BARS and not t.exit_reason:
                 t.exit_price = candle['close']
@@ -324,7 +353,15 @@ def run_backtest(
                 # Fees: maker entry (limit), taker exit (market on SL/TP)
                 fees = MAKER_FEE + TAKER_FEE
                 t.pnl_gross = gross * 100
-                t.pnl_pct = (gross - fees) * 100 * t.leverage
+
+                # If partial TP was taken, calculate combined PnL
+                if t.partial_closed:
+                    # Remaining position PnL (1 - PARTIAL_SIZE of position)
+                    remaining_pnl = (gross - fees) * 100 * t.leverage * (1 - PARTIAL_SIZE)
+                    # Total = locked partial profit + remaining position result
+                    t.pnl_pct = t.partial_pnl + remaining_pnl
+                else:
+                    t.pnl_pct = (gross - fees) * 100 * t.leverage
 
                 trades.append(t)
                 active_trade = None
@@ -498,6 +535,19 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print(f"R:R Target: {RR_TARGET}:1 | SL Buffer: {SL_BUFFER_PCT}%")
     print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'} + {'Daily(shorts)' if USE_DAILY_FOR_SHORTS else ''}")
     print(f"Direction: {TRADE_DIRECTION.upper()}")
+
+    # DD Reduction Options
+    dd_opts = []
+    if USE_TRAILING:
+        dd_opts.append(f"Trailing(start={TRAIL_START}, step={TRAIL_STEP})")
+    if USE_TIME_EXIT:
+        dd_opts.append(f"TimeExit({MAX_BARS}bars)")
+    if USE_PARTIAL_TP:
+        dd_opts.append(f"PartialTP({int(PARTIAL_SIZE*100)}%@{int(PARTIAL_TP_LEVEL*100)}%)")
+    if MAX_LEVERAGE < 20:
+        dd_opts.append(f"MaxLev={MAX_LEVERAGE}")
+    print(f"DD Reduction: {', '.join(dd_opts) if dd_opts else 'None'}")
+
     print(f"Workers: {NUM_WORKERS} | Timeout: {TOTAL_TIMEOUT}s")
     print("=" * 80)
 
@@ -546,10 +596,14 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     tp_exits = [t for t in all_trades if t.exit_reason == 'tp']
     sl_exits = [t for t in all_trades if t.exit_reason == 'sl']
     be_exits = [t for t in all_trades if t.exit_reason == 'be']
+    trail_exits = [t for t in all_trades if t.exit_reason == 'trail']
+    time_exits = [t for t in all_trades if t.exit_reason == 'time']
+    partial_trades = [t for t in all_trades if t.partial_closed]
 
-    # Wins = TP + BE (BE is breakeven, small win/loss)
-    wins = tp_exits + [t for t in be_exits if t.pnl_pct >= 0]
-    losses = sl_exits + [t for t in be_exits if t.pnl_pct < 0]
+    # Wins = TP + positive exits from BE/trail/time
+    other_exits = be_exits + trail_exits + time_exits
+    wins = tp_exits + [t for t in other_exits if t.pnl_pct >= 0]
+    losses = sl_exits + [t for t in other_exits if t.pnl_pct < 0]
 
     total_trades = len(all_trades)
     win_count = len(wins)
@@ -600,7 +654,14 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print("EXIT BREAKDOWN:")
     print(f"  TP Hits:     {len(tp_exits)} ({len(tp_exits)/total_trades*100:.1f}%)")
     print(f"  SL Hits:     {len(sl_exits)} ({len(sl_exits)/total_trades*100:.1f}%)")
-    print(f"  BE Exits:    {len(be_exits)} ({len(be_exits)/total_trades*100:.1f}%)")
+    if be_exits:
+        print(f"  BE Exits:    {len(be_exits)} ({len(be_exits)/total_trades*100:.1f}%)")
+    if trail_exits:
+        print(f"  Trail Exits: {len(trail_exits)} ({len(trail_exits)/total_trades*100:.1f}%)")
+    if time_exits:
+        print(f"  Time Exits:  {len(time_exits)} ({len(time_exits)/total_trades*100:.1f}%)")
+    if partial_trades:
+        print(f"  Partial TP:  {len(partial_trades)} ({len(partial_trades)/total_trades*100:.1f}%)")
     print("=" * 80)
 
     # Breakdown by direction
