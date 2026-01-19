@@ -211,17 +211,21 @@ def process_coin(args) -> List[ScalpTrade]:
             # DEBUG: Show first coin's date range
             if symbol.startswith('BTC') or symbol.startswith('ETH'):
                 print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: target {start_date.date()} to {end_date.date()}")
-                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: df_1m range: {df_1m['timestamp'].min()} to {df_1m['timestamp'].max()}")
-                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: df_1h range: {df_1h['timestamp'].min()} to {df_1h['timestamp'].max()}")
 
-            # Filter 1min data to target range (this is what we iterate through)
+            # Filter ALL timeframes to target range (critical for OB detection!)
+            # Need buffer before start_date for indicators and OB detection
+            buffer_start = start_date - pd.Timedelta(days=5)  # 5 day buffer for indicators
+
             df_1m = df_1m[(df_1m['timestamp'] >= start_date) & (df_1m['timestamp'] <= end_date)]
+            df_5m = df_5m[(df_5m['timestamp'] >= buffer_start) & (df_5m['timestamp'] <= end_date)]
 
             if symbol.startswith('BTC') or symbol.startswith('ETH'):
-                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: {len(df_1m)} 1m candles in range")
+                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: {len(df_1m)} 1m, {len(df_5m)} 5m candles in range")
 
             if len(df_1m) < 500:
                 return []  # Not enough data in range
+            if len(df_5m) < 100:
+                return []  # Not enough 5m data for OB detection
 
         # Add indicators (RSI on 1min for pullback confirmation)
         df_5m = calculate_indicators(df_5m)
