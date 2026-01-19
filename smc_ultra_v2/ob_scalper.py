@@ -274,17 +274,26 @@ def run_backtest(
             # === TRAILING STOP LOGIC ===
             if USE_TRAILING and profit_pct >= TRAIL_START:
                 # Calculate new SL based on profit locked
-                profit_to_lock = (profit_pct - TRAIL_START) * TRAIL_STEP
+                # Start at BE (entry), then move toward TP as profit increases
+                profit_to_lock = profit_pct * TRAIL_STEP  # Lock % of current profit
                 if t.direction == 'long':
                     new_sl = t.entry_price + (tp_distance * profit_to_lock)
                     if new_sl > t.current_sl:
                         t.current_sl = new_sl
-                        t.trail_level = max(t.trail_level, 1)
+                        # Only count as trail if past entry (actual profit locked)
+                        if new_sl > t.entry_price:
+                            t.trail_level = max(t.trail_level, 2)  # Profit locked
+                        else:
+                            t.trail_level = max(t.trail_level, 1)  # BE level
                 else:
                     new_sl = t.entry_price - (tp_distance * profit_to_lock)
                     if new_sl < t.current_sl:
                         t.current_sl = new_sl
-                        t.trail_level = max(t.trail_level, 1)
+                        # Only count as trail if past entry (actual profit locked)
+                        if new_sl < t.entry_price:
+                            t.trail_level = max(t.trail_level, 2)  # Profit locked
+                        else:
+                            t.trail_level = max(t.trail_level, 1)  # BE level
 
             # === BE LOGIC (if trailing not used) ===
             elif not USE_TRAILING:
@@ -310,13 +319,18 @@ def run_backtest(
                     partial_exit_price = t.entry_price - (tp_distance * PARTIAL_TP_LEVEL)
                     partial_gross = (t.entry_price - partial_exit_price) / t.entry_price
 
-                # Lock in partial profit (with fees for this portion)
-                partial_fees = MAKER_FEE + TAKER_FEE  # Fees on partial close
+                # Lock in partial profit
+                # Entry fee was paid on full position, only exit fee for partial
+                partial_fees = (MAKER_FEE * PARTIAL_SIZE) + TAKER_FEE
                 t.partial_pnl = (partial_gross - partial_fees) * 100 * t.leverage * PARTIAL_SIZE
                 t.partial_closed = True
 
                 # Move SL to break-even for remaining position (de-risk)
-                t.current_sl = t.entry_price
+                # Add small buffer to avoid immediate BE exit from spread/noise
+                if t.direction == 'long':
+                    t.current_sl = t.entry_price * 0.999  # Tiny buffer below entry
+                else:
+                    t.current_sl = t.entry_price * 1.001  # Tiny buffer above entry
                 t.be_triggered = True
 
             # === TIME EXIT ===
@@ -356,8 +370,9 @@ def run_backtest(
 
                 # If partial TP was taken, calculate combined PnL
                 if t.partial_closed:
-                    # Remaining position PnL (1 - PARTIAL_SIZE of position)
-                    remaining_pnl = (gross - fees) * 100 * t.leverage * (1 - PARTIAL_SIZE)
+                    # Remaining position: entry fee was shared, only pay exit fee
+                    remaining_fees = (MAKER_FEE * (1 - PARTIAL_SIZE)) + TAKER_FEE
+                    remaining_pnl = (gross - remaining_fees) * 100 * t.leverage * (1 - PARTIAL_SIZE)
                     # Total = locked partial profit + remaining position result
                     t.pnl_pct = t.partial_pnl + remaining_pnl
                 else:
