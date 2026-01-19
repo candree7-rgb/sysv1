@@ -233,6 +233,112 @@ def run_scalper():
     )
 
 
+def run_scalper_live():
+    """Run OB Scalper LIVE trading - 1:1 with backtest logic"""
+    import time
+    from datetime import datetime
+
+    print("\n" + "=" * 60, flush=True)
+    print("OB SCALPER LIVE - 1:1 Backtest Logic", flush=True)
+    print("=" * 60, flush=True)
+
+    from config import config
+    config.api.testnet = USE_TESTNET
+
+    # Check API keys
+    if not config.api.api_key:
+        print("\nERROR: BYBIT_API_KEY not set!", flush=True)
+        sys.exit(1)
+
+    from ob_scalper_live import OBScalperLive, print_signal
+    from live.executor import BybitExecutor
+    from config.coins import get_top_n_coins
+
+    scanner = OBScalperLive()
+    executor = BybitExecutor()
+
+    # Get balance
+    balance = executor.get_balance()
+    print(f"Account Balance: ${balance.get('available', 0):,.2f} USDT")
+
+    coins = get_top_n_coins(NUM_COINS)
+    # Filter known problematic coins
+    SKIP = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FHEUSDT'}
+    coins = [c for c in coins if c not in SKIP]
+
+    print(f"Scanning {len(coins)} coins...")
+    print(f"Max positions: {MAX_LONGS} longs, {MAX_SHORTS} shorts")
+    print("=" * 60)
+
+    # Track positions
+    long_positions = 0
+    short_positions = 0
+
+    # Main loop
+    scan_interval = 60  # seconds
+    while True:
+        try:
+            print(f"\n[{datetime.utcnow().strftime('%H:%M:%S')}] Scanning...", flush=True)
+
+            # Get current positions
+            positions = executor.get_positions()
+            long_positions = sum(1 for p in positions if p.get('side') == 'Buy')
+            short_positions = sum(1 for p in positions if p.get('side') == 'Sell')
+
+            print(f"  Positions: {long_positions} longs, {short_positions} shorts")
+
+            # Scan for signals
+            signals = scanner.scan_coins(coins)
+
+            for signal in signals:
+                # Check position limits
+                if signal.direction == 'long' and long_positions >= MAX_LONGS:
+                    print(f"  Skip {signal.symbol} LONG - max longs reached")
+                    continue
+                if signal.direction == 'short' and short_positions >= MAX_SHORTS:
+                    print(f"  Skip {signal.symbol} SHORT - max shorts reached")
+                    continue
+
+                print_signal(signal)
+
+                # Place order (paper mode just logs)
+                if MODE == 'paper':
+                    print(f"  [PAPER] Would place {signal.direction} order for {signal.symbol}")
+                else:
+                    # Real order placement
+                    try:
+                        result = executor.place_order(
+                            symbol=signal.symbol,
+                            side='Buy' if signal.direction == 'long' else 'Sell',
+                            order_type='Limit',
+                            qty=0.001,  # Minimum qty, adjust based on balance
+                            price=signal.entry_price,
+                            take_profit=signal.tp_price,
+                            stop_loss=signal.sl_price,
+                            leverage=signal.leverage
+                        )
+                        if result.success:
+                            print(f"  [LIVE] Order placed: {result.order_id}")
+                            if signal.direction == 'long':
+                                long_positions += 1
+                            else:
+                                short_positions += 1
+                        else:
+                            print(f"  [ERROR] Order failed: {result.error}")
+                    except Exception as e:
+                        print(f"  [ERROR] {e}")
+
+            print(f"  Next scan in {scan_interval}s...")
+            time.sleep(scan_interval)
+
+        except KeyboardInterrupt:
+            print("\nStopping bot...")
+            break
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            time.sleep(10)
+
+
 def run_mean_reversion():
     """Run Mean Reversion Short backtest"""
     print("\n" + "=" * 60, flush=True)
@@ -271,6 +377,9 @@ def main():
     elif MODE == 'scalper':
         print("[DEBUG] Calling run_scalper()...", flush=True)
         run_scalper()
+    elif MODE == 'scalper_live':
+        print("[DEBUG] Calling run_scalper_live()...", flush=True)
+        run_scalper_live()
     elif MODE == 'mean_reversion':
         print("[DEBUG] Calling run_mean_reversion()...", flush=True)
         run_mean_reversion()
@@ -279,7 +388,8 @@ def main():
         run_paper_trading()
     else:
         print(f"Unknown mode: {MODE}")
-        print("Set BOT_MODE to: paper, live, backtest, optimize, compare, variants, scalper, or mean_reversion")
+        print("Set BOT_MODE to: scalper_live, scalper, paper, live, backtest, optimize, compare, variants, or mean_reversion")
+        print("\nRecommended: BOT_MODE=scalper_live (uses ob_scalper strategy)")
 
 
 if __name__ == '__main__':
