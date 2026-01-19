@@ -211,19 +211,12 @@ def process_coin(args) -> List[ScalpTrade]:
             end_date = now - pd.Timedelta(days=SKIP_DAYS)
             start_date = now - pd.Timedelta(days=SKIP_DAYS + days)
 
-            # DEBUG: Show first coin's date range
-            if symbol.startswith('BTC') or symbol.startswith('ETH'):
-                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: target {start_date.date()} to {end_date.date()}")
-
             # Filter ALL timeframes to target range (critical for OB detection!)
             # Need buffer before start_date for indicators and OB detection
             buffer_start = start_date - pd.Timedelta(days=5)  # 5 day buffer for indicators
 
             df_1m = df_1m[(df_1m['timestamp'] >= start_date) & (df_1m['timestamp'] <= end_date)]
             df_5m = df_5m[(df_5m['timestamp'] >= buffer_start) & (df_5m['timestamp'] <= end_date)]
-
-            if symbol.startswith('BTC') or symbol.startswith('ETH'):
-                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: {len(df_1m)} 1m, {len(df_5m)} 5m candles in range")
 
             if len(df_1m) < 500:
                 return []  # Not enough data in range
@@ -282,20 +275,6 @@ def run_backtest(
     """
     trades = []
     active_trade = None
-
-    # DEBUG counters for SKIP_DAYS troubleshooting
-    dbg_no_h1_data = 0
-    dbg_h1_not_bullish = 0
-    dbg_h1_no_trend = 0
-    dbg_h4_not_aligned = 0
-    dbg_direction_filter = 0
-    dbg_no_obs = 0
-    dbg_ob_future = 0
-    dbg_ob_strength = 0
-    dbg_ob_age = 0
-    dbg_ob_direction = 0
-    dbg_ob_no_touch = 0
-    dbg_mtf_checks = 0
 
     # Create timestamp index for fast lookup
     df_5m_indexed = df_5m.set_index('timestamp')
@@ -463,7 +442,6 @@ def run_backtest(
         # Find 1H candle (must be COMPLETED, so use previous)
         h1_candles = df_1h[df_1h['timestamp'] <= ts_1h - pd.Timedelta(hours=1)]
         if len(h1_candles) == 0:
-            dbg_no_h1_data += 1
             continue
         h1_candle = h1_candles.iloc[-1]
 
@@ -472,10 +450,7 @@ def run_backtest(
         h1_bearish = h1_candle['close'] < h1_candle['ema20'] < h1_candle['ema50']
 
         if not h1_bullish and not h1_bearish:
-            dbg_h1_no_trend += 1
             continue  # No clear 1H trend - skip
-
-        dbg_mtf_checks += 1  # Count how many times we have a clear 1H trend
 
         # === 4H MTF FILTER ===
         # Requires 4H trend to align with 1H for higher probability trades
@@ -489,10 +464,8 @@ def run_backtest(
 
                 # Skip if 4H doesn't confirm 1H direction
                 if h1_bullish and not h4_bullish:
-                    dbg_h4_not_aligned += 1
                     continue  # 1H bullish but 4H not confirming
                 if h1_bearish and not h4_bearish:
-                    dbg_h4_not_aligned += 1
                     continue  # 1H bearish but 4H not confirming
 
         # Direction based on 1H trend (now confirmed by 4H if enabled)
@@ -523,10 +496,8 @@ def run_backtest(
         # === DIRECTION FILTER ===
         # Allows testing long/short independently
         if TRADE_DIRECTION == 'long' and direction == 'short':
-            dbg_direction_filter += 1
             continue  # Skip shorts in long-only mode
         if TRADE_DIRECTION == 'short' and direction == 'long':
-            dbg_direction_filter += 1
             continue  # Skip longs in short-only mode
 
         # === RSI FILTER ===
@@ -543,17 +514,11 @@ def run_backtest(
         # === FIND VALID OB ===
         current_price = candle['close']
         matching_ob = None
-        dbg_ob_checked = 0
-        dbg_ob_future_local = 0
-        dbg_ob_direction_local = 0
-        dbg_ob_age_local = 0
 
         for ob in obs:
-            dbg_ob_checked += 1
             # CRITICAL: Only use OBs we KNOW about (detection_timestamp check)
             ob_known_at = ob.detection_timestamp if ob.detection_timestamp else ob.timestamp
             if ob_known_at >= ts:
-                dbg_ob_future_local += 1
                 continue  # Don't know about this OB yet!
 
             # Check OB is not mitigated (or mitigation is in future)
@@ -564,7 +529,6 @@ def run_backtest(
             # Filter by strength (stricter for shorts)
             min_strength = OB_MIN_STRENGTH_SHORT if direction == 'short' else OB_MIN_STRENGTH
             if ob.strength < min_strength:
-                dbg_ob_strength += 1
                 continue
 
             # Filter by volume (confirms institutional interest)
@@ -575,15 +539,12 @@ def run_backtest(
             # Filter by age (in 5min candles)
             ob_age = (ts - ob.timestamp).total_seconds() / 300  # 5min = 300sec
             if ob_age > OB_MAX_AGE:
-                dbg_ob_age_local += 1
                 continue
 
             # Check direction matches
             if direction == 'long' and not ob.is_bullish:
-                dbg_ob_direction_local += 1
                 continue
             if direction == 'short' and ob.is_bullish:
-                dbg_ob_direction_local += 1
                 continue
 
             # Check if price is touching OB zone on THIS 1min candle
@@ -598,13 +559,7 @@ def run_backtest(
                     matching_ob = ob
                     break
 
-        # Track OB filter stats
-        dbg_ob_future += dbg_ob_future_local
-        dbg_ob_direction += dbg_ob_direction_local
-        dbg_ob_age += dbg_ob_age_local
-
         if not matching_ob:
-            dbg_ob_no_touch += 1
             continue
 
         # === CREATE TRADE ===
@@ -636,21 +591,6 @@ def run_backtest(
             ob_bottom=ob.bottom,
             leverage=leverage
         )
-
-    # DEBUG: Print filter stats for SKIP_DAYS troubleshooting
-    if SKIP_DAYS > 0 and (symbol.startswith('BTC') or symbol.startswith('ETH')):
-        print(f"    [DEBUG {symbol}] Candles: {len(df_1m)}, OBs: {len(obs)}")
-        print(f"    [DEBUG {symbol}] 1m range: {df_1m['timestamp'].min()} to {df_1m['timestamp'].max()}")
-        # Show first few OBs timestamps
-        if len(obs) > 0:
-            sample_obs = obs[:3]
-            for i, ob in enumerate(sample_obs):
-                det_ts = ob.detection_timestamp if ob.detection_timestamp else "None"
-                print(f"    [DEBUG {symbol}] OB[{i}]: ts={ob.timestamp}, det_ts={det_ts}, bullish={ob.is_bullish}")
-        print(f"    [DEBUG {symbol}] no_h1_data={dbg_no_h1_data}, h1_no_trend={dbg_h1_no_trend}, mtf_checks={dbg_mtf_checks}")
-        print(f"    [DEBUG {symbol}] h4_not_aligned={dbg_h4_not_aligned}, direction_filter={dbg_direction_filter}")
-        print(f"    [DEBUG {symbol}] OB: future={dbg_ob_future}, strength={dbg_ob_strength}, age={dbg_ob_age}, wrong_dir={dbg_ob_direction}, no_touch={dbg_ob_no_touch}")
-        print(f"    [DEBUG {symbol}] Trades found: {len(trades)}")
 
     return trades
 
