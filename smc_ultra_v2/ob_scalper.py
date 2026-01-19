@@ -207,8 +207,16 @@ def process_coin(args) -> List[ScalpTrade]:
             end_date = now - pd.Timedelta(days=SKIP_DAYS)
             start_date = now - pd.Timedelta(days=SKIP_DAYS + days)
 
+            # DEBUG: Show first coin's date range
+            if symbol.startswith('BTC') or symbol.startswith('ETH'):
+                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: {start_date.date()} to {end_date.date()}, {len(df_1m)} candles before filter")
+
             # Filter 1min data to target range (this is what we iterate through)
             df_1m = df_1m[(df_1m['timestamp'] >= start_date) & (df_1m['timestamp'] <= end_date)]
+
+            if symbol.startswith('BTC') or symbol.startswith('ETH'):
+                print(f"    [SKIP_DAYS={SKIP_DAYS}] {symbol}: {len(df_1m)} candles after filter")
+
             if len(df_1m) < 500:
                 return []  # Not enough data in range
 
@@ -334,11 +342,15 @@ def run_backtest(
             # Close partial position at intermediate target, let rest run
             if USE_PARTIAL_TP and not t.partial_closed and profit_pct >= PARTIAL_TP_LEVEL:
                 # Calculate PnL for the partial close
+                # Use stored tp_distance from trade, not recalculated
+                sl_dist = abs(t.entry_price - t.sl_price)
+                tp_dist = sl_dist * RR_TARGET  # Recalculate to ensure correct value
+
                 if t.direction == 'long':
-                    partial_exit_price = t.entry_price + (tp_distance * PARTIAL_TP_LEVEL)
+                    partial_exit_price = t.entry_price + (tp_dist * PARTIAL_TP_LEVEL)
                     partial_gross = (partial_exit_price - t.entry_price) / t.entry_price
                 else:
-                    partial_exit_price = t.entry_price - (tp_distance * PARTIAL_TP_LEVEL)
+                    partial_exit_price = t.entry_price - (tp_dist * PARTIAL_TP_LEVEL)
                     partial_gross = (t.entry_price - partial_exit_price) / t.entry_price
 
                 # Lock in partial profit
@@ -349,7 +361,7 @@ def run_backtest(
 
                 # DEBUG: Print first few partial calculations
                 if len(trades) < 3:
-                    print(f"    [DEBUG Partial] {symbol}: gross={partial_gross:.4f}, fees={partial_fees:.5f}, lev={t.leverage}, partial_pnl={t.partial_pnl:.2f}%")
+                    print(f"    [DEBUG Partial] {symbol}: sl_dist={sl_dist:.6f}, tp_dist={tp_dist:.6f}, entry={t.entry_price:.4f}, gross={partial_gross:.6f}, partial_pnl={t.partial_pnl:.2f}%")
 
                 # Move SL to lock in tiny profit for remaining position
                 # Long: SL above entry (exit higher = profit)
