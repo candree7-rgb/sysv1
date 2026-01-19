@@ -48,6 +48,9 @@ USE_4H_MTF = os.getenv('USE_4H_MTF', 'true').lower() == 'true'  # ON by default
 # Daily MTF Filter for Shorts - requires Daily bearish for shorts (stricter)
 USE_DAILY_FOR_SHORTS = os.getenv('USE_DAILY_FOR_SHORTS', 'true').lower() == 'true'  # ON by default
 
+# Daily MTF Filter for Longs - requires Daily bullish for longs (stricter)
+USE_DAILY_FOR_LONGS = os.getenv('USE_DAILY_FOR_LONGS', 'false').lower() == 'true'  # OFF by default
+
 # Trade Direction - allows testing long/short independently
 # Options: "both", "long", "short"
 TRADE_DIRECTION = os.getenv('TRADE_DIRECTION', 'both').lower()
@@ -506,6 +509,17 @@ def run_backtest(
                 if not daily_bearish:
                     continue  # Daily not bearish - skip short
 
+        # === DAILY MTF FILTER FOR LONGS ===
+        # Longs require Daily timeframe to also be bullish (stricter filter)
+        if USE_DAILY_FOR_LONGS and direction == 'long' and df_daily is not None:
+            ts_daily = ts.floor('D')
+            daily_candles = df_daily[df_daily['timestamp'] <= ts_daily - pd.Timedelta(days=1)]
+            if len(daily_candles) > 0:
+                daily_candle = daily_candles.iloc[-1]
+                daily_bullish = daily_candle['close'] > daily_candle['ema20'] > daily_candle['ema50']
+                if not daily_bullish:
+                    continue  # Daily not bullish - skip long
+
         # === DIRECTION FILTER ===
         # Allows testing long/short independently
         if TRADE_DIRECTION == 'long' and direction == 'short':
@@ -656,7 +670,12 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     print(f"OB Strength: Long >= {OB_MIN_STRENGTH}, Short >= {OB_MIN_STRENGTH_SHORT} | Max Age: {OB_MAX_AGE}")
     print(f"Volume Filter: {'ON (>=' + str(MIN_VOLUME_RATIO) + 'x avg)' if USE_VOLUME_FILTER else 'OFF'}")
     print(f"R:R Target: {RR_TARGET}:1 | SL Buffer: {SL_BUFFER_PCT}%")
-    print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'} + {'Daily(shorts)' if USE_DAILY_FOR_SHORTS else ''}")
+    daily_info = []
+    if USE_DAILY_FOR_SHORTS:
+        daily_info.append("Daily(shorts)")
+    if USE_DAILY_FOR_LONGS:
+        daily_info.append("Daily(longs)")
+    print(f"MTF: 1H + {'4H' if USE_4H_MTF else 'none'} + {' + '.join(daily_info) if daily_info else ''}")
     print(f"Direction: {TRADE_DIRECTION.upper()}")
 
     # DD Reduction Options
