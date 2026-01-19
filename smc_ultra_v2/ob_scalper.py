@@ -58,6 +58,19 @@ BE_THRESHOLD = float(os.getenv('BE_THRESHOLD', '0.8'))  # 80% toward TP (was 50%
 USE_BE = os.getenv('USE_BE', 'false').lower() == 'true'  # OFF by default (global)
 USE_BE_SHORTS = os.getenv('USE_BE_SHORTS', 'false').lower() == 'true'  # BE only for shorts
 
+# === DD REDUCTION OPTIONS ===
+# Option 1: Trailing Stop (moves SL progressively as price moves in favor)
+USE_TRAILING = os.getenv('USE_TRAILING', 'false').lower() == 'true'
+TRAIL_START = float(os.getenv('TRAIL_START', '0.3'))  # Start trailing at 30% toward TP
+TRAIL_STEP = float(os.getenv('TRAIL_STEP', '0.25'))  # Move SL by 25% of profit
+
+# Option 2: Time Exit (close after X bars if no TP)
+USE_TIME_EXIT = os.getenv('USE_TIME_EXIT', 'false').lower() == 'true'
+MAX_BARS = int(os.getenv('MAX_BARS', '60'))  # Max 60 1min bars = 1 hour
+
+# Option 3: Max Leverage Cap
+MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '20'))  # Default 20, set to 10 for lower DD
+
 # Fees (Bybit Futures)
 MAKER_FEE = 0.0002  # 0.02%
 TAKER_FEE = 0.00055  # 0.055%
@@ -79,10 +92,12 @@ class ScalpTrade:
     ob_bottom: float
     leverage: int = 10
 
-    # Dynamic SL for BE
-    current_sl: float = None  # Tracks SL (may move to entry for BE)
+    # Dynamic SL for BE/Trailing
+    current_sl: float = None  # Tracks SL (may move for BE/trailing)
     be_triggered: bool = False  # Has BE been activated?
     max_profit_price: float = None  # Peak price reached
+    trail_level: int = 0  # Current trailing level (0=none, 1=BE, 2+=profit locked)
+    bars_in_trade: int = 0  # Bars since entry (for time exit)
 
     # Results (filled after exit)
     exit_price: float = None
@@ -233,45 +248,69 @@ def run_backtest(
         # === CHECK ACTIVE TRADE EXIT ===
         if active_trade:
             t = active_trade  # Shorthand
+            t.bars_in_trade += 1
 
-            # Update max profit price and check for BE trigger
+            # Calculate profit progress
             if t.direction == 'long':
                 t.max_profit_price = max(t.max_profit_price, candle['high'])
-
-                # Check BE trigger: price reached X% toward TP
-                if USE_BE and not t.be_triggered:
-                    tp_distance = t.tp_price - t.entry_price
-                    current_profit = t.max_profit_price - t.entry_price
-                    if current_profit >= tp_distance * BE_THRESHOLD:
-                        t.be_triggered = True
-                        t.current_sl = t.entry_price  # Move SL to entry
-
-                # Check exits (use current_sl which may be at entry if BE triggered)
-                if candle['low'] <= t.current_sl:
-                    t.exit_price = t.current_sl
-                    t.exit_reason = 'be' if t.be_triggered else 'sl'
-                elif candle['high'] >= t.tp_price:
-                    t.exit_price = t.tp_price
-                    t.exit_reason = 'tp'
-
-            else:  # short
+                tp_distance = t.tp_price - t.entry_price
+                current_profit = t.max_profit_price - t.entry_price
+                profit_pct = current_profit / tp_distance if tp_distance > 0 else 0
+            else:
                 t.max_profit_price = min(t.max_profit_price, candle['low'])
+                tp_distance = t.entry_price - t.tp_price
+                current_profit = t.entry_price - t.max_profit_price
+                profit_pct = current_profit / tp_distance if tp_distance > 0 else 0
 
-                # Check BE trigger (USE_BE_SHORTS allows BE only for shorts)
-                if (USE_BE or USE_BE_SHORTS) and not t.be_triggered:
-                    tp_distance = t.entry_price - t.tp_price
-                    current_profit = t.entry_price - t.max_profit_price
-                    if current_profit >= tp_distance * BE_THRESHOLD:
-                        t.be_triggered = True
-                        t.current_sl = t.entry_price  # Move SL to entry
+            # === TRAILING STOP LOGIC ===
+            if USE_TRAILING and profit_pct >= TRAIL_START:
+                # Calculate new SL based on profit locked
+                profit_to_lock = (profit_pct - TRAIL_START) * TRAIL_STEP
+                if t.direction == 'long':
+                    new_sl = t.entry_price + (tp_distance * profit_to_lock)
+                    if new_sl > t.current_sl:
+                        t.current_sl = new_sl
+                        t.trail_level = max(t.trail_level, 1)
+                else:
+                    new_sl = t.entry_price - (tp_distance * profit_to_lock)
+                    if new_sl < t.current_sl:
+                        t.current_sl = new_sl
+                        t.trail_level = max(t.trail_level, 1)
 
-                # Check exits
-                if candle['high'] >= t.current_sl:
-                    t.exit_price = t.current_sl
-                    t.exit_reason = 'be' if t.be_triggered else 'sl'
-                elif candle['low'] <= t.tp_price:
-                    t.exit_price = t.tp_price
-                    t.exit_reason = 'tp'
+            # === BE LOGIC (if trailing not used) ===
+            elif not USE_TRAILING:
+                if t.direction == 'long':
+                    if USE_BE and not t.be_triggered:
+                        if profit_pct >= BE_THRESHOLD:
+                            t.be_triggered = True
+                            t.current_sl = t.entry_price
+                else:
+                    if (USE_BE or USE_BE_SHORTS) and not t.be_triggered:
+                        if profit_pct >= BE_THRESHOLD:
+                            t.be_triggered = True
+                            t.current_sl = t.entry_price
+
+            # === TIME EXIT ===
+            if USE_TIME_EXIT and t.bars_in_trade >= MAX_BARS and not t.exit_reason:
+                t.exit_price = candle['close']
+                t.exit_reason = 'time'
+
+            # === CHECK SL/TP EXITS ===
+            if not t.exit_reason:
+                if t.direction == 'long':
+                    if candle['low'] <= t.current_sl:
+                        t.exit_price = t.current_sl
+                        t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
+                    elif candle['high'] >= t.tp_price:
+                        t.exit_price = t.tp_price
+                        t.exit_reason = 'tp'
+                else:
+                    if candle['high'] >= t.current_sl:
+                        t.exit_price = t.current_sl
+                        t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
+                    elif candle['low'] <= t.tp_price:
+                        t.exit_price = t.tp_price
+                        t.exit_reason = 'tp'
 
             if t.exit_reason:
                 t.exit_time = ts
@@ -429,7 +468,7 @@ def run_backtest(
 
         # Calculate dynamic leverage based on SL distance
         sl_pct = abs(entry - sl) / entry * 100
-        leverage = min(20, max(5, int(2 / sl_pct)))  # Target ~2% risk per trade
+        leverage = min(MAX_LEVERAGE, max(5, int(2 / sl_pct)))  # Target ~2% risk per trade
 
         active_trade = ScalpTrade(
             symbol=symbol,
