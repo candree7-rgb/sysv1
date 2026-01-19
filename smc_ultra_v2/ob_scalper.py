@@ -529,11 +529,16 @@ def run_backtest(
         # === FIND VALID OB ===
         current_price = candle['close']
         matching_ob = None
+        dbg_ob_checked = 0
+        dbg_ob_future_local = 0
+        dbg_ob_direction_local = 0
 
         for ob in obs:
+            dbg_ob_checked += 1
             # CRITICAL: Only use OBs we KNOW about (detection_timestamp check)
             ob_known_at = ob.detection_timestamp if ob.detection_timestamp else ob.timestamp
             if ob_known_at >= ts:
+                dbg_ob_future_local += 1
                 continue  # Don't know about this OB yet!
 
             # Check OB is not mitigated (or mitigation is in future)
@@ -558,8 +563,10 @@ def run_backtest(
 
             # Check direction matches
             if direction == 'long' and not ob.is_bullish:
+                dbg_ob_direction_local += 1
                 continue
             if direction == 'short' and ob.is_bullish:
+                dbg_ob_direction_local += 1
                 continue
 
             # Check if price is touching OB zone on THIS 1min candle
@@ -574,7 +581,12 @@ def run_backtest(
                     matching_ob = ob
                     break
 
+        # Track OB filter stats
+        dbg_ob_future += dbg_ob_future_local
+        dbg_ob_direction += dbg_ob_direction_local
+
         if not matching_ob:
+            dbg_ob_no_touch += 1
             continue
 
         # === CREATE TRADE ===
@@ -612,6 +624,7 @@ def run_backtest(
         print(f"    [DEBUG {symbol}] Candles: {len(df_1m)}, OBs: {len(obs)}")
         print(f"    [DEBUG {symbol}] no_h1_data={dbg_no_h1_data}, h1_no_trend={dbg_h1_no_trend}, mtf_checks={dbg_mtf_checks}")
         print(f"    [DEBUG {symbol}] h4_not_aligned={dbg_h4_not_aligned}, direction_filter={dbg_direction_filter}")
+        print(f"    [DEBUG {symbol}] OB: future={dbg_ob_future}, wrong_dir={dbg_ob_direction}, no_touch={dbg_ob_no_touch}")
         print(f"    [DEBUG {symbol}] Trades found: {len(trades)}")
 
     return trades
