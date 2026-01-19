@@ -36,8 +36,9 @@ USE_PARTIAL_TP = os.getenv('USE_PARTIAL_TP', 'true').lower() == 'true'
 PARTIAL_TP_LEVEL = float(os.getenv('PARTIAL_TP_LEVEL', '0.5'))
 PARTIAL_SIZE = float(os.getenv('PARTIAL_SIZE', '0.5'))
 
-# Max leverage
+# Risk & Leverage
 MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '20'))
+RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '2.0'))  # Target risk % per trade
 
 
 @dataclass
@@ -242,7 +243,7 @@ class OBScalperLive:
 
             # Calculate leverage (same as backtest)
             sl_pct = abs(entry - sl) / entry * 100
-            leverage = min(MAX_LEVERAGE, max(5, int(2 / sl_pct)))
+            leverage = min(MAX_LEVERAGE, max(5, int(RISK_PER_TRADE_PCT / sl_pct)))
 
             # Partial TP price
             partial_tp_price = None

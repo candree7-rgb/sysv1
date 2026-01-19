@@ -73,6 +73,7 @@ MAX_BARS = int(os.getenv('MAX_BARS', '60'))  # Max 60 1min bars = 1 hour
 
 # Option 3: Max Leverage Cap
 MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '20'))  # Default 20, set to 10 for lower DD
+RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '2.0'))  # Target risk % per trade
 
 # Option 4: Partial Take Profit (lock in profits early, let remainder run)
 USE_PARTIAL_TP = os.getenv('USE_PARTIAL_TP', 'false').lower() == 'true'
@@ -578,7 +579,7 @@ def run_backtest(
 
         # Calculate dynamic leverage based on SL distance
         sl_pct = abs(entry - sl) / entry * 100
-        leverage = min(MAX_LEVERAGE, max(5, int(2 / sl_pct)))  # Target ~2% risk per trade
+        leverage = min(MAX_LEVERAGE, max(5, int(RISK_PER_TRADE_PCT / sl_pct)))
 
         active_trade = ScalpTrade(
             symbol=symbol,
