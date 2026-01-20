@@ -302,9 +302,8 @@ def run_scalper_live():
     print(f"Account Balance: ${available:,.2f} USDT", flush=True)
 
     print("[INIT] Getting coin list...", flush=True)
-    # STABILITY FIX: Limit to 30 coins to avoid API rate limits and timeouts
-    # Top 30 coins have most volume/liquidity anyway
-    live_coin_limit = min(NUM_COINS, 30)  # Reduced from 100 for stability
+    # Use full 100 coins with rolling scan approach
+    live_coin_limit = min(NUM_COINS, 100)
     coins = get_top_n_coins(live_coin_limit)
     print(f"[INIT] Got {len(coins)} coins", flush=True)
     # Filter known problematic coins
@@ -322,167 +321,134 @@ def run_scalper_live():
     # Track pending orders: {order_id: {'symbol': str, 'placed_at': datetime, 'direction': str}}
     pending_orders = {}
 
-    # Main loop - scan every 5 minutes (OBs are on 5m chart, no 1m scan needed!)
-    scan_interval = 300  # 5 minutes
+    # === ROLLING SCAN: Scan coins continuously, one at a time ===
+    # 100 coins × 2.5s = 250s per cycle (~4 min) - fits well in 5min OB window
+    SCAN_DELAY = 2.5  # seconds between each coin
+    coin_index = 0
+    last_status_time = time.time()
+    STATUS_INTERVAL = 60  # Status update every 60 seconds
+    signals_found = 0
+
+    print(f"\n[ROLLING SCAN] {len(coins)} coins × {SCAN_DELAY}s = {len(coins) * SCAN_DELAY / 60:.1f} min cycle", flush=True)
+
     while True:
         try:
             now = datetime.utcnow()
-            print(f"\n[{now.strftime('%H:%M:%S')}] Scanning...", flush=True)
+            symbol = coins[coin_index]
 
-            # === 1. CANCEL EXPIRED ORDERS ===
-            if not PAPER_MODE and pending_orders:
-                expired_orders = []
-                for order_id, info in pending_orders.items():
-                    age_min = (now - info['placed_at']).total_seconds() / 60
-                    if age_min > MAX_ORDER_AGE_MIN:
-                        expired_orders.append((order_id, info))
+            # === STATUS UPDATE (every 60s) ===
+            if time.time() - last_status_time > STATUS_INTERVAL:
+                last_status_time = time.time()
+                print(f"\n[{now.strftime('%H:%M:%S')}] ── Status ──", flush=True)
 
-                for order_id, info in expired_orders:
-                    print(f"  [EXPIRE] Cancelling {info['symbol']} order (age: {(now - info['placed_at']).total_seconds()/60:.1f}min)")
-                    if executor.cancel_order(info['symbol'], order_id):
-                        del pending_orders[order_id]
-                        print(f"    Cancelled: {order_id}")
-                    else:
-                        print(f"    Cancel failed (may be filled)")
-                        del pending_orders[order_id]  # Remove anyway
+                # Sync/cancel orders
+                if not PAPER_MODE:
+                    # Cancel expired
+                    for order_id in list(pending_orders.keys()):
+                        info = pending_orders[order_id]
+                        if (now - info['placed_at']).total_seconds() / 60 > MAX_ORDER_AGE_MIN:
+                            print(f"  [EXPIRE] {info['symbol']}", flush=True)
+                            executor.cancel_order(info['symbol'], order_id)
+                            del pending_orders[order_id]
 
-            # === 2. SYNC PENDING ORDERS WITH EXCHANGE ===
-            if not PAPER_MODE:
-                open_orders = executor.get_open_orders()
-                open_order_ids = {o['orderId'] for o in open_orders}
-                # Remove orders that are no longer pending (filled or cancelled)
-                filled_orders = [oid for oid in pending_orders if oid not in open_order_ids]
-                for oid in filled_orders:
-                    info = pending_orders.pop(oid)
-                    print(f"  [FILLED] {info['symbol']} {info['direction'].upper()} order filled!")
+                    # Check filled
+                    open_orders = executor.get_open_orders()
+                    open_ids = {o['orderId'] for o in open_orders}
+                    for oid in list(pending_orders.keys()):
+                        if oid not in open_ids:
+                            info = pending_orders.pop(oid)
+                            print(f"  [FILLED] {info['symbol']} {info['direction'].upper()}!", flush=True)
 
-            # === 3. GET CURRENT POSITIONS ===
-            positions = executor.get_all_positions()
-            long_positions = sum(1 for p in positions if p.side == 'Buy')
-            short_positions = sum(1 for p in positions if p.side == 'Sell')
-            # Count pending orders as "reserved" slots
-            pending_longs = sum(1 for o in pending_orders.values() if o['direction'] == 'long')
-            pending_shorts = sum(1 for o in pending_orders.values() if o['direction'] == 'short')
+                # Show status
+                positions = executor.get_all_positions()
+                longs = sum(1 for p in positions if p.side == 'Buy')
+                shorts = sum(1 for p in positions if p.side == 'Sell')
+                print(f"  Positions: {longs}L/{shorts}S | Pending: {len(pending_orders)}", flush=True)
+                print(f"  Cycle: {coin_index}/{len(coins)} | Signals this hour: {signals_found}", flush=True)
 
-            print(f"  Positions: {long_positions} longs, {short_positions} shorts")
-            print(f"  Pending: {pending_longs} long orders, {pending_shorts} short orders")
-
-            # === 4. SCAN FOR NEW SIGNALS (with timeout protection) ===
-            signals = []
+            # === SCAN SINGLE COIN ===
             try:
-                with ThreadPoolExecutor(max_workers=1) as scan_executor:
-                    future = scan_executor.submit(scanner.scan_coins, coins)
-                    signals = future.result(timeout=SCAN_TIMEOUT_SEC)
-            except FuturesTimeoutError:
-                print(f"  [TIMEOUT] Scan took >{SCAN_TIMEOUT_SEC}s, skipping this cycle")
-                signals = []
-            except Exception as e:
-                print(f"  [ERROR] Scan failed: {e}")
-                signals = []
+                signal = scanner.get_signal(symbol)
 
-            for signal in signals:
-                # Check position + pending limits
-                total_longs = long_positions + pending_longs
-                total_shorts = short_positions + pending_shorts
+                if signal:
+                    # Check position limits
+                    positions = executor.get_all_positions()
+                    longs = sum(1 for p in positions if p.side == 'Buy')
+                    shorts = sum(1 for p in positions if p.side == 'Sell')
+                    pending_l = sum(1 for o in pending_orders.values() if o['direction'] == 'long')
+                    pending_s = sum(1 for o in pending_orders.values() if o['direction'] == 'short')
 
-                if signal.direction == 'long' and total_longs >= MAX_LONGS:
-                    print(f"  Skip {signal.symbol} LONG - max longs reached ({total_longs}/{MAX_LONGS})")
-                    continue
-                if signal.direction == 'short' and total_shorts >= MAX_SHORTS:
-                    print(f"  Skip {signal.symbol} SHORT - max shorts reached ({total_shorts}/{MAX_SHORTS})")
-                    continue
+                    skip = False
+                    if signal.direction == 'long' and (longs + pending_l) >= MAX_LONGS:
+                        skip = True
+                    if signal.direction == 'short' and (shorts + pending_s) >= MAX_SHORTS:
+                        skip = True
+                    if any(o['symbol'] == signal.symbol for o in pending_orders.values()):
+                        skip = True
 
-                # Skip if already have pending order for this symbol
-                if any(o['symbol'] == signal.symbol for o in pending_orders.values()):
-                    print(f"  Skip {signal.symbol} - already have pending order")
-                    continue
+                    if not skip:
+                        signals_found += 1
+                        print(f"\n★ {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}", flush=True)
+                        print(f"  SL: {signal.sl_price:.4f} | TP: {signal.tp_price:.4f}", flush=True)
 
-                print_signal(signal)
-
-                # === 5. PLACE ORDER ===
-                if PAPER_MODE:
-                    # Calculate theoretical qty for display
-                    sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
-                    risk_usd = available * (RISK_PER_TRADE_PCT / 100)
-                    qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
-                    qty = qty_usd / signal.entry_price if signal.entry_price > 0 else 0
-
-                    print(f"  [PAPER] Would place {signal.direction.upper()} @ {signal.entry_price:.4f}")
-                    print(f"          SL: {signal.sl_price:.4f} ({sl_pct:.2f}%), TP: {signal.tp_price:.4f}")
-                    print(f"          Qty: {qty:.4f} (~${qty_usd:.2f}), Lev: {signal.leverage}x")
-                else:
-                    # Calculate position size
-                    balance = executor.get_balance()
-                    if 'error' in balance:
-                        print(f"  [ERROR] Can't get balance: {balance['error']}")
-                        continue
-
-                    equity = balance.get('available', 0)
-                    sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
-
-                    # Risk-based qty calculation
-                    risk_usd = equity * (RISK_PER_TRADE_PCT / 100)
-                    qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
-
-                    # Apply leverage and convert to coin qty
-                    qty = qty_usd / signal.entry_price if signal.entry_price > 0 else 0
-                    qty = round(qty, 3)  # Most coins accept 3 decimals
-
-                    if qty <= 0:
-                        print(f"  [ERROR] Invalid qty calculated: {qty}")
-                        continue
-
-                    # Set leverage first
-                    executor.set_leverage(signal.symbol, signal.leverage)
-
-                    # Place limit order with TP/SL
-                    try:
-                        response = executor.client.place_order(
-                            category="linear",
-                            symbol=signal.symbol,
-                            side='Buy' if signal.direction == 'long' else 'Sell',
-                            orderType="Limit",
-                            price=str(round(signal.entry_price, 6)),
-                            qty=str(qty),
-                            timeInForce="PostOnly",
-                            reduceOnly=False,
-                            takeProfit=str(round(signal.tp_price, 6)),
-                            stopLoss=str(round(signal.sl_price, 6)),
-                            tpslMode="Full",
-                            slOrderType="Market"
-                        )
-
-                        if response['retCode'] == 0:
-                            order_id = response['result']['orderId']
-                            pending_orders[order_id] = {
-                                'symbol': signal.symbol,
-                                'placed_at': now,
-                                'direction': signal.direction
-                            }
-                            print(f"  [LIVE] Order placed: {order_id}")
-                            print(f"         Qty: {qty:.4f} (~${qty_usd:.2f}), Expires in {MAX_ORDER_AGE_MIN}min")
+                        if PAPER_MODE:
+                            sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
+                            print(f"  [PAPER] SL: {sl_pct:.2f}%, Lev: {signal.leverage}x", flush=True)
                         else:
-                            print(f"  [ERROR] Order failed: {response['retMsg']}")
-                    except Exception as e:
-                        print(f"  [ERROR] {e}")
+                            # Place real order
+                            balance = executor.get_balance()
+                            equity = balance.get('available', 0)
+                            sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
+                            risk_usd = equity * (RISK_PER_TRADE_PCT / 100)
+                            qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
+                            qty = round(qty_usd / signal.entry_price, 3) if signal.entry_price > 0 else 0
 
-            print(f"  Pending orders: {len(pending_orders)}")
-            print(f"  Next scan in {scan_interval}s...")
-            time.sleep(scan_interval)
+                            if qty > 0:
+                                executor.set_leverage(signal.symbol, signal.leverage)
+                                try:
+                                    response = executor.client.place_order(
+                                        category="linear",
+                                        symbol=signal.symbol,
+                                        side='Buy' if signal.direction == 'long' else 'Sell',
+                                        orderType="Limit",
+                                        price=str(round(signal.entry_price, 6)),
+                                        qty=str(qty),
+                                        timeInForce="PostOnly",
+                                        reduceOnly=False,
+                                        takeProfit=str(round(signal.tp_price, 6)),
+                                        stopLoss=str(round(signal.sl_price, 6)),
+                                        tpslMode="Full",
+                                        slOrderType="Market"
+                                    )
+                                    if response['retCode'] == 0:
+                                        order_id = response['result']['orderId']
+                                        pending_orders[order_id] = {
+                                            'symbol': signal.symbol,
+                                            'placed_at': now,
+                                            'direction': signal.direction
+                                        }
+                                        print(f"  [ORDER] {order_id[:8]}... qty={qty:.4f}", flush=True)
+                                    else:
+                                        print(f"  [ERR] {response['retMsg']}", flush=True)
+                                except Exception as e:
+                                    print(f"  [ERR] {str(e)[:50]}", flush=True)
+
+            except Exception as e:
+                pass  # Silent skip - don't spam errors
+
+            # Next coin
+            coin_index = (coin_index + 1) % len(coins)
+            time.sleep(SCAN_DELAY)
 
         except KeyboardInterrupt:
-            print("\nStopping bot...")
-            # Cancel all pending orders on exit
+            print("\nStopping...", flush=True)
             if not PAPER_MODE and pending_orders:
-                print("Cancelling pending orders...")
                 for order_id, info in pending_orders.items():
                     executor.cancel_order(info['symbol'], order_id)
             break
         except Exception as e:
-            print(f"Error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(10)
+            print(f"[ERR] {e}", flush=True)
+            time.sleep(5)
 
 
 def run_mean_reversion():
