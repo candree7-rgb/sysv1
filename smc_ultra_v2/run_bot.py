@@ -321,18 +321,13 @@ def run_scalper_live():
     coins = get_top_n_coins(live_coin_limit)
     print(f"[INIT] Got {len(coins)} coins", flush=True)
 
-    # Filter problematic coins - hardcoded + ENV variable
-    SKIP_HARDCODED = {
-        'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FHEUSDT',
-        'WHITEWHALEUSDT', 'LITUSDT', 'ZKPUSDT',
-    }
-    # Add coins from ENV: SKIP_COINS="COIN1USDT,COIN2USDT,COIN3USDT"
+    # Skip coins via ENV only - auto-skip handles the rest!
+    # ENV: SKIP_COINS="COIN1USDT,COIN2USDT" (optional, for permanent skips)
     skip_env = os.getenv('SKIP_COINS', '')
-    SKIP_FROM_ENV = set(c.strip().upper() for c in skip_env.split(',') if c.strip())
-    SKIP = SKIP_HARDCODED | SKIP_FROM_ENV
+    SKIP = set(c.strip().upper() for c in skip_env.split(',') if c.strip())
 
-    if SKIP_FROM_ENV:
-        print(f"[SKIP] From ENV: {', '.join(SKIP_FROM_ENV)}", flush=True)
+    if SKIP:
+        print(f"[SKIP] From ENV: {', '.join(SKIP)}", flush=True)
 
     coins = [c for c in coins if c not in SKIP]
 
