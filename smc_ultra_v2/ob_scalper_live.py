@@ -355,12 +355,13 @@ class OBScalperLive:
         print(f"    Scanning {total} coins...", flush=True)
 
         for i, symbol in enumerate(coins):
-            # Progress every 20 coins
-            if i > 0 and i % 20 == 0:
+            # Progress every 10 coins
+            if i > 0 and i % 10 == 0:
                 elapsed = time.time() - scan_start
                 rate = i / elapsed if elapsed > 0 else 0
                 eta = (total - i) / rate if rate > 0 else 0
-                print(f"    [{i}/{total}] {len(signals)} signals, {skipped} skip - ETA {eta:.0f}s", flush=True)
+                pct = int(i / total * 100)
+                print(f"    {pct}% [{i}/{total}] {len(signals)} sig, {skipped} skip - {eta:.0f}s left", flush=True)
 
             coin_start = time.time()
             try:
