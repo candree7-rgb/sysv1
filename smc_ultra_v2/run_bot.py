@@ -291,31 +291,33 @@ def run_scalper_live():
         print(f"  Balance check failed: {e}", flush=True)
         balance = {'error': str(e)}
     if 'error' in balance:
-        print(f"  Balance Error: {balance['error']}")
-        print("  Check: API key permissions must include 'Unified Trading'")
-        print("  Check: Account must be Unified Trading Account (not Standard)")
+        print(f"  Balance Error: {balance['error']}", flush=True)
+        print("  Check: API key permissions must include 'Unified Trading'", flush=True)
+        print("  Check: Account must be Unified Trading Account (not Standard)", flush=True)
         available = 0
     else:
         available = balance.get('available', 0)
         equity = balance.get('equity', 0)
-        print(f"  Equity: ${equity:,.2f}, Available: ${available:,.2f}")
-    print(f"Account Balance: ${available:,.2f} USDT")
+        print(f"  Equity: ${equity:,.2f}, Available: ${available:,.2f}", flush=True)
+    print(f"Account Balance: ${available:,.2f} USDT", flush=True)
 
+    print("[INIT] Getting coin list...", flush=True)
     # With HTF caching, we can scan more coins (only 2 API calls per coin after first scan)
     live_coin_limit = min(NUM_COINS, 100)  # Now supports 100 coins with caching
     coins = get_top_n_coins(live_coin_limit)
+    print(f"[INIT] Got {len(coins)} coins", flush=True)
     # Filter known problematic coins
     SKIP = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FHEUSDT'}
     coins = [c for c in coins if c not in SKIP]
 
-    print(f"Scanning {len(coins)} coins...")
-    print(f"Max positions: {MAX_LONGS} longs, {MAX_SHORTS} shorts")
-    print("=" * 60)
+    print(f"Scanning {len(coins)} coins...", flush=True)
+    print(f"Max positions: {MAX_LONGS} longs, {MAX_SHORTS} shorts", flush=True)
+    print("=" * 60, flush=True)
 
     # Pre-load HTF data for all coins (makes scans much faster)
-    print("\n[STARTUP] Pre-loading HTF data (this takes a few minutes)...")
+    print("\n[STARTUP] Pre-loading HTF data (this takes a few minutes)...", flush=True)
     scanner.preload_data(coins)
-    print("[STARTUP] Ready to scan!\n")
+    print("[STARTUP] Ready to scan!\n", flush=True)
 
     # Track pending orders: {order_id: {'symbol': str, 'placed_at': datetime, 'direction': str}}
     pending_orders = {}
