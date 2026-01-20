@@ -249,11 +249,12 @@ def run_scalper_live():
     print("\n" + "=" * 60, flush=True)
     print("OB SCALPER LIVE - 1:1 Backtest Logic", flush=True)
     print("=" * 60, flush=True)
-    print(f"Mode: {'PAPER (no real orders)' if PAPER_MODE else 'LIVE (real orders!)'}")
-    print(f"Network: {'TESTNET' if USE_TESTNET else 'MAINNET'}")
-    print(f"Order Expiry: {MAX_ORDER_AGE_MIN} minutes")
+    print(f"Mode: {'PAPER (no real orders)' if PAPER_MODE else 'LIVE (real orders!)'}", flush=True)
+    print(f"Network: {'TESTNET' if USE_TESTNET else 'MAINNET'}", flush=True)
+    print(f"Order Expiry: {MAX_ORDER_AGE_MIN} minutes", flush=True)
     print("=" * 60, flush=True)
 
+    print("[INIT] Loading config...", flush=True)
     from config import config
     config.api.testnet = USE_TESTNET
 
@@ -261,13 +262,23 @@ def run_scalper_live():
     if not config.api.api_key:
         print("\nERROR: BYBIT_API_KEY not set!", flush=True)
         sys.exit(1)
+    print("[INIT] Config OK", flush=True)
 
+    print("[INIT] Importing modules...", flush=True)
     from ob_scalper_live import OBScalperLive, print_signal
+    print("[INIT] OBScalperLive imported", flush=True)
     from live.executor import BybitExecutor
+    print("[INIT] BybitExecutor imported", flush=True)
     from config.coins import get_top_n_coins
+    print("[INIT] All imports done", flush=True)
 
+    print("[INIT] Creating scanner...", flush=True)
     scanner = OBScalperLive()
+    print("[INIT] Scanner created", flush=True)
+
+    print("[INIT] Creating executor...", flush=True)
     executor = BybitExecutor()
+    print("[INIT] Executor created", flush=True)
 
     # Get balance with detailed debug
     print("Checking account balance...")
