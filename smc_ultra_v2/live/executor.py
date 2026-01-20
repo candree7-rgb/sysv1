@@ -249,7 +249,7 @@ class BybitExecutor:
     def get_open_orders(self, symbol: str = None) -> list:
         """Get all open/pending orders"""
         try:
-            params = {"category": "linear"}
+            params = {"category": "linear", "settleCoin": "USDT"}  # settleCoin required when no symbol
             if symbol:
                 params["symbol"] = symbol
 
