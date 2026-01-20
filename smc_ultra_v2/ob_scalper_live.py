@@ -276,15 +276,34 @@ class OBScalperLive:
             print(f"Error checking {symbol}: {e}")
             return None
 
-    def scan_coins(self, coins: List[str]) -> List[LiveSignal]:
-        """Scan multiple coins for signals"""
+    def scan_coins(self, coins: List[str], timeout_per_coin: int = 10) -> List[LiveSignal]:
+        """Scan multiple coins for signals with per-coin timeout"""
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
         signals = []
+        skipped = 0
 
         for symbol in coins:
-            signal = self.get_signal(symbol)
-            if signal:
-                signals.append(signal)
-                print(f"  [SIGNAL] {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}")
+            try:
+                # Use thread with timeout to prevent hanging on slow API calls
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(self.get_signal, symbol)
+                    signal = future.result(timeout=timeout_per_coin)
+
+                if signal:
+                    signals.append(signal)
+                    print(f"  [SIGNAL] {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}")
+            except FuturesTimeoutError:
+                skipped += 1
+                if skipped <= 3:  # Only log first few
+                    print(f"  [SKIP] {symbol} timeout")
+            except Exception as e:
+                skipped += 1
+                if skipped <= 3:
+                    print(f"  [SKIP] {symbol}: {str(e)[:30]}")
+
+        if skipped > 3:
+            print(f"  ... and {skipped - 3} more skipped")
 
         return signals
 

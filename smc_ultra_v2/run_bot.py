@@ -237,11 +237,14 @@ def run_scalper():
 def run_scalper_live():
     """Run OB Scalper LIVE trading - 1:1 with backtest logic"""
     import time
+    import signal
     from datetime import datetime, timedelta
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
     # Order management settings
     MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # Cancel unfilled orders after X minutes
     RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '2.0'))
+    SCAN_TIMEOUT_SEC = int(os.getenv('SCAN_TIMEOUT_SEC', '120'))  # Max time for full scan
 
     print("\n" + "=" * 60, flush=True)
     print("OB SCALPER LIVE - 1:1 Backtest Logic", flush=True)
@@ -332,8 +335,18 @@ def run_scalper_live():
             print(f"  Positions: {long_positions} longs, {short_positions} shorts")
             print(f"  Pending: {pending_longs} long orders, {pending_shorts} short orders")
 
-            # === 4. SCAN FOR NEW SIGNALS ===
-            signals = scanner.scan_coins(coins)
+            # === 4. SCAN FOR NEW SIGNALS (with timeout protection) ===
+            signals = []
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(scanner.scan_coins, coins)
+                    signals = future.result(timeout=SCAN_TIMEOUT_SEC)
+            except FuturesTimeoutError:
+                print(f"  [TIMEOUT] Scan took >{SCAN_TIMEOUT_SEC}s, skipping this cycle")
+                signals = []
+            except Exception as e:
+                print(f"  [ERROR] Scan failed: {e}")
+                signals = []
 
             for signal in signals:
                 # Check position + pending limits
