@@ -269,13 +269,19 @@ def run_scalper_live():
     scanner = OBScalperLive()
     executor = BybitExecutor()
 
-    # Get balance
+    # Get balance with detailed debug
+    print("Checking account balance...")
     balance = executor.get_balance()
+    print(f"  Raw balance response: {balance}")
     if 'error' in balance:
-        print(f"Balance Error: {balance['error']}")
+        print(f"  Balance Error: {balance['error']}")
+        print("  Check: API key permissions must include 'Unified Trading'")
+        print("  Check: Account must be Unified Trading Account (not Standard)")
         available = 0
     else:
         available = balance.get('available', 0)
+        equity = balance.get('equity', 0)
+        print(f"  Equity: ${equity:,.2f}, Available: ${available:,.2f}")
     print(f"Account Balance: ${available:,.2f} USDT")
 
     coins = get_top_n_coins(NUM_COINS)
@@ -338,8 +344,8 @@ def run_scalper_live():
             # === 4. SCAN FOR NEW SIGNALS (with timeout protection) ===
             signals = []
             try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(scanner.scan_coins, coins)
+                with ThreadPoolExecutor(max_workers=1) as scan_executor:
+                    future = scan_executor.submit(scanner.scan_coins, coins)
                     signals = future.result(timeout=SCAN_TIMEOUT_SEC)
             except FuturesTimeoutError:
                 print(f"  [TIMEOUT] Scan took >{SCAN_TIMEOUT_SEC}s, skipping this cycle")
