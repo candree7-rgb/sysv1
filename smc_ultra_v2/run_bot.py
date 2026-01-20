@@ -294,6 +294,92 @@ def run_scalper_live():
     executor = BybitExecutor()
     print("[INIT] Executor created", flush=True)
 
+    # === WEBSOCKET FOR REAL-TIME ORDER MONITORING ===
+    # Track trade pairs for SL→BE after TP1
+    # Format: {symbol: {'order1': id, 'order2': id, 'entry': price, 'direction': str, 'tp1_filled': bool}}
+    trade_pairs = {}
+
+    def on_order_update(message):
+        """Handle order fill events - move SL to BE after TP1"""
+        try:
+            if 'data' not in message:
+                return
+
+            for order_data in message['data']:
+                order_id = order_data.get('orderId', '')
+                symbol = order_data.get('symbol', '')
+                status = order_data.get('orderStatus', '')
+
+                # Only care about filled orders
+                if status != 'Filled':
+                    continue
+
+                # Check if this is part of a trade pair
+                if symbol not in trade_pairs:
+                    continue
+
+                pair = trade_pairs[symbol]
+
+                # Check if TP1 order was filled (order1)
+                if order_id == pair.get('order1') and not pair.get('tp1_filled'):
+                    pair['tp1_filled'] = True
+                    entry_price = pair['entry']
+                    direction = pair['direction']
+
+                    print(f"\n  [TP1 HIT] {symbol} - Moving SL to BE ({entry_price:.4f})", flush=True)
+
+                    # Move SL to break-even for remaining position
+                    try:
+                        # Use set_trading_stop to modify position SL
+                        response = executor.client.set_trading_stop(
+                            category="linear",
+                            symbol=symbol,
+                            stopLoss=str(round(entry_price, 6)),
+                            slTriggerBy="LastPrice",
+                            positionIdx=0
+                        )
+                        if response['retCode'] == 0:
+                            print(f"  [BE SET] {symbol} SL moved to {entry_price:.4f}", flush=True)
+                        else:
+                            print(f"  [WARN] SL modify failed: {response.get('retMsg', 'unknown')}", flush=True)
+                    except Exception as e:
+                        print(f"  [ERR] SL modify: {str(e)[:50]}", flush=True)
+
+                # Check if TP2 order was filled (order2) - trade complete
+                elif order_id == pair.get('order2'):
+                    print(f"\n  [TP2 HIT] {symbol} - Trade complete!", flush=True)
+                    del trade_pairs[symbol]
+
+        except Exception as e:
+            print(f"  [WS ERR] {str(e)[:50]}", flush=True)
+
+    # Start WebSocket in background thread
+    if not PAPER_MODE:
+        print("[INIT] Starting WebSocket...", flush=True)
+        try:
+            from live.websocket import BybitWebSocket
+            import threading
+
+            ws = BybitWebSocket(testnet=USE_TESTNET)
+            ws.on_order(on_order_update)
+
+            def ws_thread():
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(ws.start())
+                # Keep running
+                while ws.running:
+                    time.sleep(1)
+
+            ws_runner = threading.Thread(target=ws_thread, daemon=True)
+            ws_runner.start()
+            time.sleep(2)  # Give WS time to connect
+            print("[INIT] WebSocket started", flush=True)
+        except Exception as e:
+            print(f"[WARN] WebSocket failed: {e} - continuing without real-time updates", flush=True)
+            ws = None
+
     # Get balance with detailed debug
     print("Checking account balance...", flush=True)
     try:
@@ -581,6 +667,17 @@ def run_scalper_live():
                                             'ob_key': ob_key
                                         }
                                         print(f"  [ORDER2] {oid2[:8]}... qty={qty2}", flush=True)
+
+                                        # Register trade pair for WebSocket monitoring (SL→BE after TP1)
+                                        if resp1['retCode'] == 0:
+                                            trade_pairs[signal.symbol] = {
+                                                'order1': oid1,  # TP1 order
+                                                'order2': oid2,  # TP2 order
+                                                'entry': signal.entry_price,
+                                                'direction': signal.direction,
+                                                'tp1_filled': False
+                                            }
+                                            print(f"  [TRACK] Registered for SL→BE monitoring", flush=True)
                                     else:
                                         print(f"  [ERR2] {resp2['retMsg']}", flush=True)
 
