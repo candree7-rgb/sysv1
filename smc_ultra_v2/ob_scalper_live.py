@@ -115,7 +115,7 @@ class OBScalperLive:
             self._htf_cache[cache_key] = (df, now)
         return df
 
-    def get_signal(self, symbol: str) -> Optional[LiveSignal]:
+    def get_signal(self, symbol: str, debug: bool = False) -> Optional[LiveSignal]:
         """
         Check if there's a valid entry signal for a symbol.
 
@@ -132,10 +132,13 @@ class OBScalperLive:
             df_daily = self._get_htf_cached(symbol, "D", 60) if USE_DAILY_FOR_SHORTS else None
 
             if df_5m is None or len(df_5m) < 100:
+                if debug: print(f"      {symbol}: No 5m data")
                 return None
             if df_1m is None or len(df_1m) < 50:
+                if debug: print(f"      {symbol}: No 1m data")
                 return None
             if df_1h is None or len(df_1h) < 50:
+                if debug: print(f"      {symbol}: No 1h data")
                 return None
 
             # Add indicators
@@ -307,35 +310,44 @@ class OBScalperLive:
     def scan_coins(self, coins: List[str], timeout_per_coin: int = 10) -> List[LiveSignal]:
         """Scan multiple coins for signals with per-coin timeout"""
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+        import time
 
         signals = []
         skipped = 0
         total = len(coins)
+        scan_start = time.time()
+
+        print(f"    [DEBUG] Starting scan of {total} coins...", flush=True)
 
         for i, symbol in enumerate(coins):
             # Progress every 10 coins
             if i > 0 and i % 10 == 0:
-                print(f"    Progress: {i}/{total} coins scanned...", flush=True)
+                elapsed = time.time() - scan_start
+                print(f"    Progress: {i}/{total} coins scanned ({elapsed:.1f}s elapsed)...", flush=True)
+
+            coin_start = time.time()
             try:
-                # Use thread with timeout to prevent hanging on slow API calls
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(self.get_signal, symbol)
-                    signal = future.result(timeout=timeout_per_coin)
+                # Direct call without thread - simpler and more stable
+                signal = self.get_signal(symbol)
+                coin_time = time.time() - coin_start
 
                 if signal:
                     signals.append(signal)
-                    print(f"  [SIGNAL] {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}")
-            except FuturesTimeoutError:
-                skipped += 1
-                if skipped <= 3:  # Only log first few
-                    print(f"  [SKIP] {symbol} timeout")
+                    print(f"  [SIGNAL] {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f} ({coin_time:.1f}s)")
+                elif coin_time > 5:  # Log slow coins
+                    print(f"    [SLOW] {symbol} took {coin_time:.1f}s (no signal)", flush=True)
+
             except Exception as e:
                 skipped += 1
-                if skipped <= 3:
-                    print(f"  [SKIP] {symbol}: {str(e)[:30]}")
+                coin_time = time.time() - coin_start
+                if skipped <= 5:  # Log first 5 errors
+                    print(f"  [ERROR] {symbol}: {str(e)[:50]} ({coin_time:.1f}s)", flush=True)
 
-        if skipped > 3:
-            print(f"  ... and {skipped - 3} more skipped")
+        total_time = time.time() - scan_start
+        print(f"    [DEBUG] Scan complete: {len(signals)} signals, {skipped} errors, {total_time:.1f}s total", flush=True)
+
+        if skipped > 5:
+            print(f"    ... and {skipped - 5} more errors", flush=True)
 
         return signals
 
