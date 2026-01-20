@@ -68,10 +68,12 @@ class BybitExecutor:
 
     def __init__(self):
         self.api_config = config.api
+        # Add timeout to prevent hanging
         self.client = HTTP(
             testnet=self.api_config.testnet,
             api_key=self.api_config.api_key,
-            api_secret=self.api_config.api_secret
+            api_secret=self.api_config.api_secret,
+            recv_window=10000  # 10 second receive window
         )
 
         self.positions: Dict[str, Position] = {}

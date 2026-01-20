@@ -281,9 +281,15 @@ def run_scalper_live():
     print("[INIT] Executor created", flush=True)
 
     # Get balance with detailed debug
-    print("Checking account balance...")
-    balance = executor.get_balance()
-    print(f"  Raw balance response: {balance}")
+    print("Checking account balance...", flush=True)
+    try:
+        import socket
+        socket.setdefaulttimeout(30)  # 30 second timeout for all connections
+        balance = executor.get_balance()
+        print(f"  Raw balance response: {balance}", flush=True)
+    except Exception as e:
+        print(f"  Balance check failed: {e}", flush=True)
+        balance = {'error': str(e)}
     if 'error' in balance:
         print(f"  Balance Error: {balance['error']}")
         print("  Check: API key permissions must include 'Unified Trading'")
