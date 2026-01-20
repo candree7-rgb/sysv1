@@ -89,6 +89,32 @@ class OBScalperLive:
         self.dl = BybitDataDownloader()
         self.ob_detector = OrderBlockDetector(min_strength=0.5)
 
+        # HTF Cache - don't re-download every scan (saves 300 API calls!)
+        self._htf_cache = {}  # {symbol: {'1h': (df, timestamp), '4h': (df, ts), 'D': (df, ts)}}
+        self._htf_cache_duration = {
+            '60': 15 * 60,    # 1H data: cache 15 min
+            '240': 60 * 60,   # 4H data: cache 1 hour
+            'D': 4 * 60 * 60  # Daily data: cache 4 hours
+        }
+
+    def _get_htf_cached(self, symbol: str, interval: str, days: int):
+        """Get HTF data with caching to reduce API calls"""
+        import time
+        now = time.time()
+
+        cache_key = f"{symbol}_{interval}"
+        if cache_key in self._htf_cache:
+            df, cached_at = self._htf_cache[cache_key]
+            cache_duration = self._htf_cache_duration.get(interval, 300)
+            if now - cached_at < cache_duration:
+                return df  # Return cached
+
+        # Download fresh
+        df = self.dl.load_or_download(symbol, interval, days)
+        if df is not None and len(df) > 0:
+            self._htf_cache[cache_key] = (df, now)
+        return df
+
     def get_signal(self, symbol: str) -> Optional[LiveSignal]:
         """
         Check if there's a valid entry signal for a symbol.
@@ -97,11 +123,13 @@ class OBScalperLive:
         """
         try:
             # Load data (same timeframes as backtest)
+            # LTF: Always fresh (5m, 1m needed for signals)
             df_5m = self.dl.load_or_download(symbol, "5", 7)
             df_1m = self.dl.load_or_download(symbol, "1", 2)
-            df_1h = self.dl.load_or_download(symbol, "60", 14)
-            df_4h = self.dl.load_or_download(symbol, "240", 30) if USE_4H_MTF else None
-            df_daily = self.dl.load_or_download(symbol, "D", 60) if USE_DAILY_FOR_SHORTS else None
+            # HTF: Use cache (1H, 4H, Daily don't change every minute)
+            df_1h = self._get_htf_cached(symbol, "60", 14)
+            df_4h = self._get_htf_cached(symbol, "240", 30) if USE_4H_MTF else None
+            df_daily = self._get_htf_cached(symbol, "D", 60) if USE_DAILY_FOR_SHORTS else None
 
             if df_5m is None or len(df_5m) < 100:
                 return None
