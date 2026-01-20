@@ -367,6 +367,9 @@ def run_scalper_live():
                 print(f"  Cycle: {coin_index}/{len(coins)} | Signals this hour: {signals_found}", flush=True)
 
             # === SCAN SINGLE COIN (with hard timeout) ===
+            # Debug: show which coin we're scanning
+            print(f"  [{coin_index}] {symbol}...", end="", flush=True)
+
             signal = None
             try:
                 # Use signal.alarm for hard timeout (kills blocking I/O)
@@ -380,14 +383,15 @@ def run_scalper_live():
 
                 try:
                     signal = scanner.get_signal(symbol)
+                    print(" OK", flush=True)
                 finally:
                     sig.alarm(0)  # Cancel alarm
                     sig.signal(sig.SIGALRM, old_handler)  # Restore handler
 
             except TimeoutError:
-                print(f"  [TIMEOUT] {symbol}", flush=True)
+                print(" TIMEOUT!", flush=True)
             except Exception as e:
-                pass  # Silent skip
+                print(f" err:{str(e)[:20]}", flush=True)
 
             if signal:
                 # Check position limits
