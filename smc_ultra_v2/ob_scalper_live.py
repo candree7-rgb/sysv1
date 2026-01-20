@@ -145,33 +145,29 @@ class OBScalperLive:
 
     def get_signal(self, symbol: str, debug: bool = False) -> Optional[LiveSignal]:
         """
-        Check if there's a valid entry signal for a symbol.
+        Check if there's a valid OB setup for a symbol.
 
-        Returns LiveSignal if valid setup found, None otherwise.
+        SIMPLIFIED: No 1m check needed! We just detect OB and place limit order.
+        Bybit handles whether price reaches it or not.
         """
         try:
-            # Load data - ALL CACHED for speed
-            # First scan: downloads fresh, subsequent scans: uses cache
-            df_5m = self._get_cached(symbol, "5", 1)      # 5m cached 5min
-            df_1m = self._get_cached(symbol, "1", 1)      # 1m cached 1min
-            df_1h = self._get_cached(symbol, "60", 7)     # 1H cached 15min
-            df_4h = self._get_cached(symbol, "240", 14) if USE_4H_MTF else None  # 4H cached 1hr
-            df_daily = self._get_cached(symbol, "D", 30) if USE_DAILY_FOR_SHORTS else None  # Daily cached 4hr
+            # Load data - NO 1M NEEDED for live!
+            # We just detect OB on 5m and check MTF alignment
+            df_5m = self._get_cached(symbol, "5", 1)      # 5m for OB detection
+            df_1h = self._get_cached(symbol, "60", 7)     # 1H for MTF
+            df_4h = self._get_cached(symbol, "240", 14) if USE_4H_MTF else None
+            df_daily = self._get_cached(symbol, "D", 30) if USE_DAILY_FOR_SHORTS else None
 
-            if df_5m is None or len(df_5m) < 50:  # Reduced from 100
+            if df_5m is None or len(df_5m) < 50:
                 if debug: print(f"      {symbol}: No 5m data")
                 return None
-            if df_1m is None or len(df_1m) < 30:  # Reduced from 50
-                if debug: print(f"      {symbol}: No 1m data")
-                return None
-            if df_1h is None or len(df_1h) < 20:  # Reduced from 50
+            if df_1h is None or len(df_1h) < 20:
                 if debug: print(f"      {symbol}: No 1h data")
                 return None
 
             # Add indicators
             df_5m = calculate_indicators(df_5m)
             df_1h = calculate_indicators(df_1h)
-            df_1m = calculate_indicators(df_1m)
             if df_4h is not None:
                 df_4h = calculate_indicators(df_4h)
             if df_daily is not None:
@@ -186,17 +182,13 @@ class OBScalperLive:
             if not obs:
                 return None
 
-            # Get current candle
-            current_1m = df_1m.iloc[-1]
-            ts = current_1m['timestamp']
-            current_price = current_1m['close']
+            # Get current 5m candle (no 1m needed!)
+            current_5m = df_5m.iloc[-1]
+            ts = current_5m['timestamp']
+            current_price = current_5m['close']
 
             # === 1H MTF CHECK ===
-            ts_1h = ts.floor('1h')
-            h1_candles = df_1h[df_1h['timestamp'] <= ts_1h - pd.Timedelta(hours=1)]
-            if len(h1_candles) == 0:
-                return None
-            h1_candle = h1_candles.iloc[-1]
+            h1_candle = df_1h.iloc[-2]  # Use completed 1H candle
 
             h1_bullish = h1_candle['close'] > h1_candle['ema20'] > h1_candle['ema50']
             h1_bearish = h1_candle['close'] < h1_candle['ema20'] < h1_candle['ema50']
@@ -205,65 +197,51 @@ class OBScalperLive:
                 return None  # No clear 1H trend
 
             # === 4H MTF CHECK ===
-            if USE_4H_MTF and df_4h is not None:
-                ts_4h = ts.floor('4h')
-                h4_candles = df_4h[df_4h['timestamp'] <= ts_4h - pd.Timedelta(hours=4)]
-                if len(h4_candles) > 0:
-                    h4_candle = h4_candles.iloc[-1]
-                    h4_bullish = h4_candle['close'] > h4_candle['ema20'] > h4_candle['ema50']
-                    h4_bearish = h4_candle['close'] < h4_candle['ema20'] < h4_candle['ema50']
+            if USE_4H_MTF and df_4h is not None and len(df_4h) > 1:
+                h4_candle = df_4h.iloc[-2]  # Use completed 4H candle
+                h4_bullish = h4_candle['close'] > h4_candle['ema20'] > h4_candle['ema50']
+                h4_bearish = h4_candle['close'] < h4_candle['ema20'] < h4_candle['ema50']
 
-                    # 4H must confirm 1H
-                    if h1_bullish and not h4_bullish:
-                        return None
-                    if h1_bearish and not h4_bearish:
-                        return None
+                # 4H must confirm 1H
+                if h1_bullish and not h4_bullish:
+                    return None
+                if h1_bearish and not h4_bearish:
+                    return None
 
             # Direction
             direction = 'long' if h1_bullish else 'short'
 
             # === DAILY FILTER FOR SHORTS ONLY ===
-            if USE_DAILY_FOR_SHORTS and direction == 'short' and df_daily is not None:
-                ts_daily = ts.floor('D')
-                daily_candles = df_daily[df_daily['timestamp'] <= ts_daily - pd.Timedelta(days=1)]
-                if len(daily_candles) > 0:
-                    daily_candle = daily_candles.iloc[-1]
-                    daily_bearish = daily_candle['close'] < daily_candle['ema20'] < daily_candle['ema50']
-                    if not daily_bearish:
-                        return None  # Daily not bearish - skip short
+            if USE_DAILY_FOR_SHORTS and direction == 'short' and df_daily is not None and len(df_daily) > 1:
+                daily_candle = df_daily.iloc[-2]  # Use completed daily candle
+                daily_bearish = daily_candle['close'] < daily_candle['ema20'] < daily_candle['ema50']
+                if not daily_bearish:
+                    return None  # Daily not bearish - skip short
 
             # === DAILY FILTER FOR LONGS (disabled by default) ===
-            if USE_DAILY_FOR_LONGS and direction == 'long' and df_daily is not None:
-                ts_daily = ts.floor('D')
-                daily_candles = df_daily[df_daily['timestamp'] <= ts_daily - pd.Timedelta(days=1)]
-                if len(daily_candles) > 0:
-                    daily_candle = daily_candles.iloc[-1]
-                    daily_bullish = daily_candle['close'] > daily_candle['ema20'] > daily_candle['ema50']
-                    if not daily_bullish:
-                        return None  # Daily not bullish - skip long
+            if USE_DAILY_FOR_LONGS and direction == 'long' and df_daily is not None and len(df_daily) > 1:
+                daily_candle = df_daily.iloc[-2]  # Use completed daily candle
+                daily_bullish = daily_candle['close'] > daily_candle['ema20'] > daily_candle['ema50']
+                if not daily_bullish:
+                    return None  # Daily not bullish - skip long
 
-            # === FIND VALID OB ===
-            matching_ob = None
+            # === FIND VALID OB (no price touch check - just find best OB!) ===
+            best_ob = None
+            best_ob_age = float('inf')
 
             for ob in obs:
-                # Detection timestamp check (no look-ahead!)
-                ob_known_at = ob.detection_timestamp if ob.detection_timestamp else ob.timestamp
-                if ob_known_at >= ts:
-                    continue
-
                 # Not mitigated
                 if ob.is_mitigated:
-                    if ob.mitigation_timestamp and ob.mitigation_timestamp <= ts:
-                        continue
+                    continue
 
                 # Strength filter
                 min_strength = OB_MIN_STRENGTH_SHORT if direction == 'short' else OB_MIN_STRENGTH
                 if ob.strength < min_strength:
                     continue
 
-                # Age filter
+                # Age filter (in 5min candles)
                 ob_age = (ts - ob.timestamp).total_seconds() / 300
-                if ob_age > OB_MAX_AGE:
+                if ob_age > OB_MAX_AGE or ob_age < 0:
                     continue
 
                 # Direction match
@@ -272,18 +250,15 @@ class OBScalperLive:
                 if direction == 'short' and ob.is_bullish:
                     continue
 
-                # Price touching OB zone
-                if direction == 'long':
-                    if current_1m['low'] <= ob.top <= current_1m['high']:
-                        matching_ob = ob
-                        break
-                else:
-                    if current_1m['low'] <= ob.bottom <= current_1m['high']:
-                        matching_ob = ob
-                        break
+                # Pick the FRESHEST valid OB (lowest age)
+                if ob_age < best_ob_age:
+                    best_ob = ob
+                    best_ob_age = ob_age
 
-            if not matching_ob:
+            if not best_ob:
                 return None
+
+            matching_ob = best_ob
 
             # === CREATE SIGNAL ===
             ob = matching_ob

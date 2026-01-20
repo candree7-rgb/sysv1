@@ -303,8 +303,8 @@ def run_scalper_live():
     # Track pending orders: {order_id: {'symbol': str, 'placed_at': datetime, 'direction': str}}
     pending_orders = {}
 
-    # Main loop
-    scan_interval = 60  # seconds
+    # Main loop - scan every 5 minutes (OBs are on 5m chart, no 1m scan needed!)
+    scan_interval = 300  # 5 minutes
     while True:
         try:
             now = datetime.utcnow()
