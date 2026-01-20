@@ -349,6 +349,7 @@ def run_scalper_live():
     STATUS_INTERVAL = 60  # Status update every 60 seconds
     signals_found = 0
     runtime_skip = set()  # Coins that timeout get added here automatically
+    used_obs = set()  # Track OBs that have been traded (filled) - format: "SYMBOL_obtop_obbottom"
 
     print(f"\n[ROLLING SCAN] {len(coins)} coins × {SCAN_DELAY}s = {len(coins) * SCAN_DELAY / 60:.1f} min cycle", flush=True)
 
@@ -383,6 +384,9 @@ def run_scalper_live():
                     for oid in list(pending_orders.keys()):
                         if oid not in open_ids:
                             info = pending_orders.pop(oid)
+                            # Mark this OB as used so we don't trade it again!
+                            if 'ob_key' in info:
+                                used_obs.add(info['ob_key'])
                             print(f"  [FILLED] {info['symbol']} {info['direction'].upper()}!", flush=True)
 
                 # Show status
@@ -449,11 +453,20 @@ def run_scalper_live():
                 pending_s = sum(1 for o in pending_orders.values() if o['direction'] == 'short')
 
                 skip = False
+                ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
+
                 if signal.direction == 'long' and (longs + pending_l) >= MAX_LONGS:
                     skip = True
                 if signal.direction == 'short' and (shorts + pending_s) >= MAX_SHORTS:
                     skip = True
                 if any(o['symbol'] == signal.symbol for o in pending_orders.values()):
+                    skip = True
+                if ob_key in used_obs:
+                    print(f"  [SKIP] {symbol} - OB already traded", flush=True)
+                    skip = True
+                # Also check if we already have a position for this symbol!
+                if any(p.symbol == signal.symbol for p in positions):
+                    print(f"  [SKIP] {symbol} - already in position", flush=True)
                     skip = True
 
                 if not skip:
@@ -511,10 +524,12 @@ def run_scalper_live():
                                 )
                                 if response['retCode'] == 0:
                                     order_id = response['result']['orderId']
+                                    ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
                                     pending_orders[order_id] = {
                                         'symbol': signal.symbol,
                                         'placed_at': now,
-                                        'direction': signal.direction
+                                        'direction': signal.direction,
+                                        'ob_key': ob_key
                                     }
                                     print(f"  [ORDER] {order_id[:8]}... qty={qty:.4f}", flush=True)
                                 else:
