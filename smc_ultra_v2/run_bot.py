@@ -507,35 +507,116 @@ def run_scalper_live():
 
                         if qty > 0:
                             executor.set_leverage(signal.symbol, signal.leverage)
-                            try:
-                                response = executor.client.place_order(
-                                    category="linear",
-                                    symbol=signal.symbol,
-                                    side='Buy' if signal.direction == 'long' else 'Sell',
-                                    orderType="Limit",
-                                    price=str(round(signal.entry_price, 6)),
-                                    qty=str(qty),
-                                    timeInForce="PostOnly",
-                                    reduceOnly=False,
-                                    takeProfit=str(round(signal.tp_price, 6)),
-                                    stopLoss=str(round(signal.sl_price, 6)),
-                                    tpslMode="Full",
-                                    slOrderType="Market"
-                                )
-                                if response['retCode'] == 0:
-                                    order_id = response['result']['orderId']
-                                    ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
-                                    pending_orders[order_id] = {
-                                        'symbol': signal.symbol,
-                                        'placed_at': now,
-                                        'direction': signal.direction,
-                                        'ob_key': ob_key
-                                    }
-                                    print(f"  [ORDER] {order_id[:8]}... qty={qty:.4f}", flush=True)
+                            ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
+                            side = 'Buy' if signal.direction == 'long' else 'Sell'
+
+                            # === PARTIAL TP: Split into 2 orders (like backtest) ===
+                            if signal.use_partial_tp and signal.partial_tp_price:
+                                qty1 = qty * signal.partial_size  # First 50%
+                                qty2 = qty - qty1  # Remaining 50%
+
+                                # Round quantities
+                                if signal.entry_price > 100:
+                                    qty1, qty2 = round(qty1, 2), round(qty2, 2)
+                                elif signal.entry_price > 1:
+                                    qty1, qty2 = round(qty1, 1), round(qty2, 1)
                                 else:
-                                    print(f"  [ERR] {response['retMsg']}", flush=True)
-                            except Exception as e:
-                                print(f"  [ERR] {str(e)[:50]}", flush=True)
+                                    qty1, qty2 = round(qty1, 0), round(qty2, 0)
+
+                                print(f"  [PARTIAL] Order1: {qty1} @ TP1={signal.partial_tp_price:.4f}", flush=True)
+                                print(f"  [PARTIAL] Order2: {qty2} @ TP2={signal.tp_price:.4f}", flush=True)
+
+                                try:
+                                    # Order 1: Partial TP (closes first at 50% of target)
+                                    resp1 = executor.client.place_order(
+                                        category="linear",
+                                        symbol=signal.symbol,
+                                        side=side,
+                                        orderType="Limit",
+                                        price=str(round(signal.entry_price, 6)),
+                                        qty=str(qty1),
+                                        timeInForce="PostOnly",
+                                        reduceOnly=False,
+                                        takeProfit=str(round(signal.partial_tp_price, 6)),
+                                        stopLoss=str(round(signal.sl_price, 6)),
+                                        tpslMode="Full",
+                                        slOrderType="Market"
+                                    )
+
+                                    # Order 2: Full TP (runs to full target)
+                                    resp2 = executor.client.place_order(
+                                        category="linear",
+                                        symbol=signal.symbol,
+                                        side=side,
+                                        orderType="Limit",
+                                        price=str(round(signal.entry_price, 6)),
+                                        qty=str(qty2),
+                                        timeInForce="PostOnly",
+                                        reduceOnly=False,
+                                        takeProfit=str(round(signal.tp_price, 6)),
+                                        stopLoss=str(round(signal.sl_price, 6)),
+                                        tpslMode="Full",
+                                        slOrderType="Market"
+                                    )
+
+                                    # Track both orders
+                                    if resp1['retCode'] == 0:
+                                        oid1 = resp1['result']['orderId']
+                                        pending_orders[oid1] = {
+                                            'symbol': signal.symbol,
+                                            'placed_at': now,
+                                            'direction': signal.direction,
+                                            'ob_key': ob_key
+                                        }
+                                        print(f"  [ORDER1] {oid1[:8]}... qty={qty1}", flush=True)
+                                    else:
+                                        print(f"  [ERR1] {resp1['retMsg']}", flush=True)
+
+                                    if resp2['retCode'] == 0:
+                                        oid2 = resp2['result']['orderId']
+                                        pending_orders[oid2] = {
+                                            'symbol': signal.symbol,
+                                            'placed_at': now,
+                                            'direction': signal.direction,
+                                            'ob_key': ob_key
+                                        }
+                                        print(f"  [ORDER2] {oid2[:8]}... qty={qty2}", flush=True)
+                                    else:
+                                        print(f"  [ERR2] {resp2['retMsg']}", flush=True)
+
+                                except Exception as e:
+                                    print(f"  [ERR] {str(e)[:50]}", flush=True)
+
+                            else:
+                                # === SINGLE ORDER (no partial TP) ===
+                                try:
+                                    response = executor.client.place_order(
+                                        category="linear",
+                                        symbol=signal.symbol,
+                                        side=side,
+                                        orderType="Limit",
+                                        price=str(round(signal.entry_price, 6)),
+                                        qty=str(qty),
+                                        timeInForce="PostOnly",
+                                        reduceOnly=False,
+                                        takeProfit=str(round(signal.tp_price, 6)),
+                                        stopLoss=str(round(signal.sl_price, 6)),
+                                        tpslMode="Full",
+                                        slOrderType="Market"
+                                    )
+                                    if response['retCode'] == 0:
+                                        order_id = response['result']['orderId']
+                                        pending_orders[order_id] = {
+                                            'symbol': signal.symbol,
+                                            'placed_at': now,
+                                            'direction': signal.direction,
+                                            'ob_key': ob_key
+                                        }
+                                        print(f"  [ORDER] {order_id[:8]}... qty={qty:.4f}", flush=True)
+                                    else:
+                                        print(f"  [ERR] {response['retMsg']}", flush=True)
+                                except Exception as e:
+                                    print(f"  [ERR] {str(e)[:50]}", flush=True)
 
             # Next coin
             coin_index = (coin_index + 1) % len(coins)
