@@ -442,6 +442,45 @@ def run_scalper_live():
     # Track pending orders: {order_id: {'symbol': str, 'placed_at': datetime, 'direction': str}}
     pending_orders = {}
 
+    # === LOAD EXISTING ORDERS ON STARTUP (prevents duplicates after restart) ===
+    if not PAPER_MODE:
+        print("[STARTUP] Loading existing open orders...", flush=True)
+        try:
+            existing_orders = executor.get_open_orders()
+            for order in existing_orders:
+                oid = order.get('orderId', '')
+                symbol = order.get('symbol', '')
+                side = order.get('side', '')
+                direction = 'long' if side == 'Buy' else 'short'
+                pending_orders[oid] = {
+                    'symbol': symbol,
+                    'placed_at': datetime.utcnow(),  # Approximate
+                    'direction': direction,
+                    'ob_key': f"{symbol}_unknown"  # Can't recover exact OB
+                }
+            if existing_orders:
+                symbols = set(o['symbol'] for o in existing_orders)
+                print(f"  [LOADED] {len(existing_orders)} orders for: {', '.join(symbols)}", flush=True)
+            else:
+                print("  [LOADED] No existing orders", flush=True)
+        except Exception as e:
+            print(f"  [WARN] Could not load orders: {e}", flush=True)
+
+    # === LOAD EXISTING POSITIONS (skip coins with open positions) ===
+    existing_position_symbols = set()
+    if not PAPER_MODE:
+        print("[STARTUP] Loading existing positions...", flush=True)
+        try:
+            positions = executor.get_all_positions()
+            for pos in positions:
+                existing_position_symbols.add(pos.symbol)
+            if positions:
+                print(f"  [LOADED] Positions: {', '.join(existing_position_symbols)}", flush=True)
+            else:
+                print("  [LOADED] No existing positions", flush=True)
+        except Exception as e:
+            print(f"  [WARN] Could not load positions: {e}", flush=True)
+
     # === ROLLING SCAN: Scan coins continuously, one at a time ===
     SCAN_DELAY = 2.5  # seconds between each coin
     coin_index = 0
