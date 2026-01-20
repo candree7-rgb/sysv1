@@ -98,6 +98,32 @@ class OBScalperLive:
             '240': 60 * 60,   # 4H data: cache 1 hour
             'D': 4 * 60 * 60  # Daily data: cache 4 hours
         }
+        self._preloaded = False
+
+    def preload_data(self, coins: List[str]):
+        """Pre-load HTF data for all coins to speed up scanning"""
+        import time
+        print(f"    [PRELOAD] Loading HTF data for {len(coins)} coins...")
+        start = time.time()
+        loaded = 0
+
+        for i, symbol in enumerate(coins):
+            if i > 0 and i % 20 == 0:
+                print(f"    [PRELOAD] {i}/{len(coins)} coins...", flush=True)
+            try:
+                # Pre-load HTF (slow to download, but cached long)
+                self._get_cached(symbol, "60", 7)
+                if USE_4H_MTF:
+                    self._get_cached(symbol, "240", 14)
+                if USE_DAILY_FOR_SHORTS:
+                    self._get_cached(symbol, "D", 30)
+                loaded += 1
+            except Exception as e:
+                print(f"    [PRELOAD] Skip {symbol}: {str(e)[:30]}")
+
+        elapsed = time.time() - start
+        print(f"    [PRELOAD] Done! {loaded} coins in {elapsed:.1f}s")
+        self._preloaded = True
 
     def _get_cached(self, symbol: str, interval: str, days: int):
         """Get data with caching to reduce API calls"""

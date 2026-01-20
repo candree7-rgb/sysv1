@@ -244,7 +244,7 @@ def run_scalper_live():
     # Order management settings
     MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # Cancel unfilled orders after X minutes
     RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '2.0'))
-    SCAN_TIMEOUT_SEC = int(os.getenv('SCAN_TIMEOUT_SEC', '120'))  # Max time for full scan
+    SCAN_TIMEOUT_SEC = int(os.getenv('SCAN_TIMEOUT_SEC', '300'))  # 5 min for full scan (first scan slow)
 
     print("\n" + "=" * 60, flush=True)
     print("OB SCALPER LIVE - 1:1 Backtest Logic", flush=True)
@@ -291,9 +291,14 @@ def run_scalper_live():
     SKIP = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FHEUSDT'}
     coins = [c for c in coins if c not in SKIP]
 
-    print(f"Scanning {len(coins)} coins (limited for stability)...")
+    print(f"Scanning {len(coins)} coins...")
     print(f"Max positions: {MAX_LONGS} longs, {MAX_SHORTS} shorts")
     print("=" * 60)
+
+    # Pre-load HTF data for all coins (makes scans much faster)
+    print("\n[STARTUP] Pre-loading HTF data (this takes a few minutes)...")
+    scanner.preload_data(coins)
+    print("[STARTUP] Ready to scan!\n")
 
     # Track pending orders: {order_id: {'symbol': str, 'placed_at': datetime, 'direction': str}}
     pending_orders = {}
