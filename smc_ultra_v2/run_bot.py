@@ -12,9 +12,18 @@ import asyncio
 import threading
 from datetime import datetime
 
-# CRITICAL: Set global socket timeout to prevent hanging on slow/dead connections
-# This affects ALL network operations including requests, pybit, etc.
-socket.setdefaulttimeout(20)  # 20 seconds max for any network operation
+# CRITICAL: Set global socket timeout
+socket.setdefaulttimeout(20)
+
+# CRITICAL: Monkey-patch requests to ALWAYS use timeout
+# This prevents ANY request from hanging forever
+import requests
+_original_request = requests.Session.request
+def _timeout_request(self, method, url, **kwargs):
+    if 'timeout' not in kwargs or kwargs['timeout'] is None:
+        kwargs['timeout'] = 15  # Force 15s timeout on all requests
+    return _original_request(self, method, url, **kwargs)
+requests.Session.request = _timeout_request
 
 # Suppress pybit WebSocket thread errors (cosmetic, doesn't affect operation)
 def _silent_thread_exception(args):
@@ -314,7 +323,7 @@ def run_scalper_live():
     # Filter known problematic coins (hang during API calls on Railway)
     SKIP = {
         'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FHEUSDT',
-        'WHITEWHALEUSDT',  # Confirmed hanging
+        'WHITEWHALEUSDT', 'LITUSDT',  # Confirmed hanging on Railway
     }
     coins = [c for c in coins if c not in SKIP]
 
