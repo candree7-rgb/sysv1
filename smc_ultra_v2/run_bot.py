@@ -326,20 +326,26 @@ def run_scalper_live():
                     entry_price = pair['entry']
                     direction = pair['direction']
 
-                    print(f"\n  [TP1 HIT] {symbol} - Moving SL to BE ({entry_price:.4f})", flush=True)
+                    # Move SL to lock in tiny profit (0.1%) - exactly like backtest
+                    if direction == 'long':
+                        new_sl = entry_price * 1.001  # 0.1% above entry
+                    else:
+                        new_sl = entry_price * 0.999  # 0.1% below entry
 
-                    # Move SL to break-even for remaining position
+                    print(f"\n  [TP1 HIT] {symbol} - Moving SL to BE+ ({new_sl:.6f})", flush=True)
+
+                    # Move SL to lock in tiny profit for remaining position
                     try:
                         # Use set_trading_stop to modify position SL
                         response = executor.client.set_trading_stop(
                             category="linear",
                             symbol=symbol,
-                            stopLoss=str(round(entry_price, 6)),
+                            stopLoss=str(round(new_sl, 6)),
                             slTriggerBy="LastPrice",
                             positionIdx=0
                         )
                         if response['retCode'] == 0:
-                            print(f"  [BE SET] {symbol} SL moved to {entry_price:.4f}", flush=True)
+                            print(f"  [BE+ SET] {symbol} SL → {new_sl:.6f} (0.1% locked)", flush=True)
                         else:
                             print(f"  [WARN] SL modify failed: {response.get('retMsg', 'unknown')}", flush=True)
                     except Exception as e:
