@@ -7,9 +7,14 @@ Downloads data and starts the bot automatically.
 
 import os
 import sys
+import socket
 import asyncio
 import threading
 from datetime import datetime
+
+# CRITICAL: Set global socket timeout to prevent hanging on slow/dead connections
+# This affects ALL network operations including requests, pybit, etc.
+socket.setdefaulttimeout(20)  # 20 seconds max for any network operation
 
 # Suppress pybit WebSocket thread errors (cosmetic, doesn't affect operation)
 def _silent_thread_exception(args):
@@ -369,32 +374,22 @@ def run_scalper_live():
                 print(f"  Positions: {longs}L/{shorts}S | Pending: {len(pending_orders)}", flush=True)
                 print(f"  Cycle: {coin_index}/{len(coins)} | Signals this hour: {signals_found}", flush=True)
 
-            # === SCAN SINGLE COIN (with hard timeout) ===
-            # Debug: show which coin we're scanning
+            # === SCAN SINGLE COIN ===
+            # Global socket timeout (20s) will auto-skip hanging coins
             print(f"  [{coin_index}] {symbol}...", end="", flush=True)
 
             signal = None
             try:
-                # Use signal.alarm for hard timeout (kills blocking I/O)
-                import signal as sig
-
-                def timeout_handler(signum, frame):
-                    raise TimeoutError(f"{symbol} timeout")
-
-                old_handler = sig.signal(sig.SIGALRM, timeout_handler)
-                sig.alarm(15)  # 15 second hard timeout
-
-                try:
-                    signal = scanner.get_signal(symbol)
-                    print(" OK", flush=True)
-                finally:
-                    sig.alarm(0)  # Cancel alarm
-                    sig.signal(sig.SIGALRM, old_handler)  # Restore handler
-
-            except TimeoutError:
+                signal = scanner.get_signal(symbol)
+                print(" OK", flush=True)
+            except socket.timeout:
                 print(" TIMEOUT!", flush=True)
             except Exception as e:
-                print(f" err:{str(e)[:20]}", flush=True)
+                err_msg = str(e)[:25]
+                if 'timed out' in err_msg.lower():
+                    print(" TIMEOUT!", flush=True)
+                else:
+                    print(f" skip", flush=True)
 
             if signal:
                 # Check position limits
