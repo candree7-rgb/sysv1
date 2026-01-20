@@ -164,6 +164,8 @@ class BybitExecutor:
             )
             # 110043 = "leverage not modified" = already set correctly = OK
             if response['retCode'] == 0 or response['retCode'] == 110043:
+                status = "set" if response['retCode'] == 0 else "already set"
+                print(f"  [LEV] {symbol} leverage {leverage}x ({status})", flush=True)
                 return True
             print(f"  [WARN] Leverage error: {response.get('retMsg', 'unknown')}")
             return False
