@@ -302,8 +302,9 @@ def run_scalper_live():
     print(f"Account Balance: ${available:,.2f} USDT", flush=True)
 
     print("[INIT] Getting coin list...", flush=True)
-    # With HTF caching, we can scan more coins (only 2 API calls per coin after first scan)
-    live_coin_limit = min(NUM_COINS, 100)  # Now supports 100 coins with caching
+    # STABILITY FIX: Limit to 30 coins to avoid API rate limits and timeouts
+    # Top 30 coins have most volume/liquidity anyway
+    live_coin_limit = min(NUM_COINS, 30)  # Reduced from 100 for stability
     coins = get_top_n_coins(live_coin_limit)
     print(f"[INIT] Got {len(coins)} coins", flush=True)
     # Filter known problematic coins
