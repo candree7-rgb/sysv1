@@ -344,8 +344,7 @@ class OBScalperLive:
             return None
 
     def scan_coins(self, coins: List[str], timeout_per_coin: int = 10) -> List[LiveSignal]:
-        """Scan multiple coins for signals with per-coin timeout"""
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+        """Scan multiple coins for signals with rate limiting"""
         import time
 
         signals = []
@@ -353,37 +352,36 @@ class OBScalperLive:
         total = len(coins)
         scan_start = time.time()
 
-        print(f"    [DEBUG] Starting scan of {total} coins...", flush=True)
+        print(f"    Scanning {total} coins...", flush=True)
 
         for i, symbol in enumerate(coins):
-            # Progress every 10 coins
-            if i > 0 and i % 10 == 0:
+            # Progress every 20 coins
+            if i > 0 and i % 20 == 0:
                 elapsed = time.time() - scan_start
-                print(f"    Progress: {i}/{total} coins scanned ({elapsed:.1f}s elapsed)...", flush=True)
+                rate = i / elapsed if elapsed > 0 else 0
+                eta = (total - i) / rate if rate > 0 else 0
+                print(f"    [{i}/{total}] {len(signals)} signals, {skipped} skip - ETA {eta:.0f}s", flush=True)
 
             coin_start = time.time()
             try:
-                # Direct call without thread - simpler and more stable
                 signal = self.get_signal(symbol)
                 coin_time = time.time() - coin_start
 
                 if signal:
                     signals.append(signal)
-                    print(f"  [SIGNAL] {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f} ({coin_time:.1f}s)")
-                elif coin_time > 5:  # Log slow coins
-                    print(f"    [SLOW] {symbol} took {coin_time:.1f}s (no signal)", flush=True)
+                    print(f"  ★ {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}", flush=True)
 
             except Exception as e:
                 skipped += 1
-                coin_time = time.time() - coin_start
-                if skipped <= 5:  # Log first 5 errors
-                    print(f"  [ERROR] {symbol}: {str(e)[:50]} ({coin_time:.1f}s)", flush=True)
+                if skipped <= 3:
+                    print(f"  [skip] {symbol}: {str(e)[:30]}", flush=True)
+
+            # Small delay every 5 coins to avoid rate limits
+            if i > 0 and i % 5 == 0:
+                time.sleep(0.05)  # 50ms
 
         total_time = time.time() - scan_start
-        print(f"    [DEBUG] Scan complete: {len(signals)} signals, {skipped} errors, {total_time:.1f}s total", flush=True)
-
-        if skipped > 5:
-            print(f"    ... and {skipped - 5} more errors", flush=True)
+        print(f"    Done: {len(signals)} signals in {total_time:.1f}s", flush=True)
 
         return signals
 

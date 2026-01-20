@@ -314,10 +314,9 @@ def run_scalper_live():
     print(f"Max positions: {MAX_LONGS} longs, {MAX_SHORTS} shorts", flush=True)
     print("=" * 60, flush=True)
 
-    # Pre-load HTF data for all coins (makes scans much faster)
-    print("\n[STARTUP] Pre-loading HTF data (this takes a few minutes)...", flush=True)
-    scanner.preload_data(coins)
-    print("[STARTUP] Ready to scan!\n", flush=True)
+    # Skip preload - let cache build naturally during scans
+    # First few scans will be slower but won't hang
+    print("\n[STARTUP] Starting scans (HTF cache builds automatically)...", flush=True)
 
     # Track pending orders: {order_id: {'symbol': str, 'placed_at': datetime, 'direction': str}}
     pending_orders = {}
