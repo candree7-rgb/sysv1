@@ -284,12 +284,14 @@ def run_scalper_live():
         print(f"  Equity: ${equity:,.2f}, Available: ${available:,.2f}")
     print(f"Account Balance: ${available:,.2f} USDT")
 
-    coins = get_top_n_coins(NUM_COINS)
+    # For stability, limit coins in live mode (each coin = 5 API calls)
+    live_coin_limit = min(NUM_COINS, 30)  # Max 30 coins = 150 API calls per scan
+    coins = get_top_n_coins(live_coin_limit)
     # Filter known problematic coins
     SKIP = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FHEUSDT'}
     coins = [c for c in coins if c not in SKIP]
 
-    print(f"Scanning {len(coins)} coins...")
+    print(f"Scanning {len(coins)} coins (limited for stability)...")
     print(f"Max positions: {MAX_LONGS} longs, {MAX_SHORTS} shorts")
     print("=" * 60)
 

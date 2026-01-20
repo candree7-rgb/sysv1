@@ -282,8 +282,12 @@ class OBScalperLive:
 
         signals = []
         skipped = 0
+        total = len(coins)
 
-        for symbol in coins:
+        for i, symbol in enumerate(coins):
+            # Progress every 10 coins
+            if i > 0 and i % 10 == 0:
+                print(f"    Progress: {i}/{total} coins scanned...", flush=True)
             try:
                 # Use thread with timeout to prevent hanging on slow API calls
                 with ThreadPoolExecutor(max_workers=1) as executor:
