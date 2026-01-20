@@ -579,11 +579,12 @@ def run_scalper_live():
                         risk_usd = equity * (RISK_PER_TRADE_PCT / 100)
                         qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
 
-                        # Cap position size to 80% of available margin * leverage
-                        max_position_usd = equity * 0.8 * signal.leverage
+                        # Cap position size - divide by max positions so all can fit
+                        max_positions = MAX_LONGS + MAX_SHORTS  # e.g. 2+2=4
+                        max_position_usd = (equity * 0.8 / max_positions) * signal.leverage
                         if qty_usd > max_position_usd:
                             qty_usd = max_position_usd
-                            print(f"  [CAP] Position capped to ${qty_usd:.0f}", flush=True)
+                            print(f"  [CAP] Position capped to ${qty_usd:.0f} (1/{max_positions} of margin)", flush=True)
 
                         qty = qty_usd / signal.entry_price if signal.entry_price > 0 else 0
 
