@@ -300,7 +300,7 @@ def run_scalper_live():
     trade_pairs = {}
 
     def on_order_update(message):
-        """Handle order fill events - move SL to BE after TP1"""
+        """Handle order fill events - move SL to BE after TP1 + SL safety check"""
         try:
             if 'data' not in message:
                 return
@@ -313,6 +313,14 @@ def run_scalper_live():
                 # Only care about filled orders
                 if status != 'Filled':
                     continue
+
+                # === SAFETY: Check if position has SL after any fill ===
+                # Small delay to let the order settle
+                time.sleep(0.5)
+                has_sl, current_sl, entry_price, side = executor.check_position_has_sl(symbol)
+                if not has_sl and entry_price:
+                    print(f"\n  [DANGER] {symbol} has NO SL! Setting emergency SL...", flush=True)
+                    executor.set_emergency_sl(symbol, entry_price, side, max_loss_pct=2.0)
 
                 # Check if this is part of a trade pair
                 if symbol not in trade_pairs:
@@ -599,6 +607,8 @@ def run_scalper_live():
                         print(f"  [CALC] qty={qty}, notional=${qty*signal.entry_price:.0f}, margin=${qty*signal.entry_price/signal.leverage:.0f}", flush=True)
 
                         if qty > 0:
+                            # SAFETY: Set isolated margin first (loss limited to this position only)
+                            executor.set_isolated_margin(signal.symbol)
                             executor.set_leverage(signal.symbol, signal.leverage)
                             ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
                             side = 'Buy' if signal.direction == 'long' else 'Sell'

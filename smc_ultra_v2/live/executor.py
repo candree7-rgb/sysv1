@@ -153,6 +153,30 @@ class BybitExecutor:
             print(f"Error getting position: {e}")
             return None
 
+    def set_isolated_margin(self, symbol: str) -> bool:
+        """Set margin mode to ISOLATED for safety (loss limited to position, not account)"""
+        try:
+            response = self.client.switch_margin_mode(
+                category="linear",
+                symbol=symbol,
+                tradeMode=1,  # 0=cross, 1=isolated
+                buyLeverage="10",  # Required param, will be overwritten by set_leverage
+                sellLeverage="10"
+            )
+            if response['retCode'] == 0:
+                print(f"  [ISOLATED] {symbol} margin mode set to ISOLATED", flush=True)
+                return True
+            # 110026 = already isolated
+            if response['retCode'] == 110026:
+                return True
+            return False
+        except Exception as e:
+            if '110026' in str(e) or 'isolated' in str(e).lower():
+                return True  # Already isolated
+            # Don't fail on this - just warn
+            print(f"  [WARN] Isolated margin: {str(e)[:40]}")
+            return False
+
     def set_leverage(self, symbol: str, leverage: int) -> bool:
         """Set leverage for symbol"""
         try:
@@ -175,6 +199,42 @@ class BybitExecutor:
             if '110043' in str(e) or 'not modified' in str(e).lower():
                 return True  # Already set, that's fine
             print(f"Error setting leverage: {e}")
+            return False
+
+    def check_position_has_sl(self, symbol: str) -> tuple:
+        """Check if position has SL set. Returns (has_sl, current_sl, entry_price, side)"""
+        try:
+            pos = self.get_position(symbol)
+            if not pos:
+                return (True, None, None, None)  # No position = safe
+
+            has_sl = pos.stop_loss is not None and pos.stop_loss > 0
+            return (has_sl, pos.stop_loss, pos.entry_price, pos.side)
+        except Exception as e:
+            print(f"  [ERR] Check SL: {e}")
+            return (True, None, None, None)  # Assume safe on error
+
+    def set_emergency_sl(self, symbol: str, entry_price: float, side: str, max_loss_pct: float = 2.0) -> bool:
+        """Set emergency SL at max_loss_pct from entry"""
+        try:
+            if side == 'Buy':  # Long position
+                sl_price = entry_price * (1 - max_loss_pct / 100)
+            else:  # Short position
+                sl_price = entry_price * (1 + max_loss_pct / 100)
+
+            response = self.client.set_trading_stop(
+                category="linear",
+                symbol=symbol,
+                stopLoss=str(round(sl_price, 6)),
+                slTriggerBy="LastPrice",
+                positionIdx=0
+            )
+            if response['retCode'] == 0:
+                print(f"  [EMERGENCY SL] {symbol} SL set to {sl_price:.6f} ({max_loss_pct}% max loss)", flush=True)
+                return True
+            return False
+        except Exception as e:
+            print(f"  [ERR] Emergency SL: {e}")
             return False
 
     def open_position(
