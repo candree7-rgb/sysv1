@@ -162,9 +162,16 @@ class BybitExecutor:
                 buyLeverage=str(leverage),
                 sellLeverage=str(leverage)
             )
-            return response['retCode'] == 0
+            # 110043 = "leverage not modified" = already set correctly = OK
+            if response['retCode'] == 0 or response['retCode'] == 110043:
+                return True
+            print(f"  [WARN] Leverage error: {response.get('retMsg', 'unknown')}")
+            return False
 
         except Exception as e:
+            # Check if it's the "not modified" error in exception message
+            if '110043' in str(e) or 'not modified' in str(e).lower():
+                return True  # Already set, that's fine
             print(f"Error setting leverage: {e}")
             return False
 
