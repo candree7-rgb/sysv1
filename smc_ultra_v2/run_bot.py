@@ -348,12 +348,12 @@ def run_scalper_live():
     pending_orders = {}
 
     # === ROLLING SCAN: Scan coins continuously, one at a time ===
-    # 100 coins × 2.5s = 250s per cycle (~4 min) - fits well in 5min OB window
     SCAN_DELAY = 2.5  # seconds between each coin
     coin_index = 0
     last_status_time = time.time()
     STATUS_INTERVAL = 60  # Status update every 60 seconds
     signals_found = 0
+    runtime_skip = set()  # Coins that timeout get added here automatically
 
     print(f"\n[ROLLING SCAN] {len(coins)} coins × {SCAN_DELAY}s = {len(coins) * SCAN_DELAY / 60:.1f} min cycle", flush=True)
 
@@ -361,6 +361,11 @@ def run_scalper_live():
         try:
             now = datetime.utcnow()
             symbol = coins[coin_index]
+
+            # Skip coins that timed out previously
+            if symbol in runtime_skip:
+                coin_index = (coin_index + 1) % len(coins)
+                continue
 
             # === STATUS UPDATE (every 60s) ===
             if time.time() - last_status_time > STATUS_INTERVAL:
@@ -390,24 +395,55 @@ def run_scalper_live():
                 longs = sum(1 for p in positions if p.side == 'Buy')
                 shorts = sum(1 for p in positions if p.side == 'Sell')
                 print(f"  Positions: {longs}L/{shorts}S | Pending: {len(pending_orders)}", flush=True)
-                print(f"  Cycle: {coin_index}/{len(coins)} | Signals this hour: {signals_found}", flush=True)
+                print(f"  Cycle: {coin_index}/{len(coins)} | Signals: {signals_found}", flush=True)
+                if runtime_skip:
+                    print(f"  Auto-skipped: {', '.join(runtime_skip)}", flush=True)
 
-            # === SCAN SINGLE COIN ===
-            # Global socket timeout (20s) will auto-skip hanging coins
+            # === SCAN SINGLE COIN (with process-based timeout) ===
             print(f"  [{coin_index}] {symbol}...", end="", flush=True)
 
             signal = None
             try:
-                signal = scanner.get_signal(symbol)
-                print(" OK", flush=True)
-            except socket.timeout:
-                print(" TIMEOUT!", flush=True)
-            except Exception as e:
-                err_msg = str(e)[:25]
-                if 'timed out' in err_msg.lower():
+                # Use multiprocessing for REAL timeout (can kill stuck processes)
+                import multiprocessing
+                from multiprocessing import Process, Queue
+
+                def scan_worker(sym, queue):
+                    try:
+                        # Re-create scanner in subprocess
+                        from ob_scalper_live import OBScalperLive
+                        worker_scanner = OBScalperLive()
+                        result = worker_scanner.get_signal(sym)
+                        queue.put(('ok', result))
+                    except Exception as ex:
+                        queue.put(('error', str(ex)[:50]))
+
+                result_queue = Queue()
+                proc = Process(target=scan_worker, args=(symbol, result_queue))
+                proc.start()
+                proc.join(timeout=20)  # 20 second hard timeout
+
+                if proc.is_alive():
+                    # Process hung - kill it!
+                    proc.terminate()
+                    proc.join(timeout=2)
+                    if proc.is_alive():
+                        proc.kill()  # Force kill
                     print(" TIMEOUT!", flush=True)
+                    # Add to runtime skip list
+                    runtime_skip.add(symbol)
+                elif not result_queue.empty():
+                    status, data = result_queue.get_nowait()
+                    if status == 'ok':
+                        signal = data
+                        print(" OK", flush=True)
+                    else:
+                        print(f" skip", flush=True)
                 else:
-                    print(f" skip", flush=True)
+                    print(" skip", flush=True)
+
+            except Exception as e:
+                print(f" err", flush=True)
 
             if signal:
                 # Check position limits
