@@ -320,11 +320,20 @@ def run_scalper_live():
     live_coin_limit = min(NUM_COINS, 100)
     coins = get_top_n_coins(live_coin_limit)
     print(f"[INIT] Got {len(coins)} coins", flush=True)
-    # Filter known problematic coins (hang during API calls on Railway)
-    SKIP = {
+
+    # Filter problematic coins - hardcoded + ENV variable
+    SKIP_HARDCODED = {
         'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FHEUSDT',
-        'WHITEWHALEUSDT', 'LITUSDT', 'ZKPUSDT',  # Confirmed hanging
+        'WHITEWHALEUSDT', 'LITUSDT', 'ZKPUSDT',
     }
+    # Add coins from ENV: SKIP_COINS="COIN1USDT,COIN2USDT,COIN3USDT"
+    skip_env = os.getenv('SKIP_COINS', '')
+    SKIP_FROM_ENV = set(c.strip().upper() for c in skip_env.split(',') if c.strip())
+    SKIP = SKIP_HARDCODED | SKIP_FROM_ENV
+
+    if SKIP_FROM_ENV:
+        print(f"[SKIP] From ENV: {', '.join(SKIP_FROM_ENV)}", flush=True)
+
     coins = [c for c in coins if c not in SKIP]
 
     print(f"Scanning {len(coins)} coins...", flush=True)
