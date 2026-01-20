@@ -103,13 +103,20 @@ class OBScalperLive:
     def preload_data(self, coins: List[str]):
         """Pre-load HTF data for all coins to speed up scanning"""
         import time
-        print(f"    [PRELOAD] Loading HTF data for {len(coins)} coins...")
+        total = len(coins)
+        print(f"    [PRELOAD] Loading HTF data for {total} coins...", flush=True)
         start = time.time()
         loaded = 0
+        errors = 0
 
         for i, symbol in enumerate(coins):
-            if i > 0 and i % 20 == 0:
-                print(f"    [PRELOAD] {i}/{len(coins)} coins...", flush=True)
+            # Progress every 10 coins or 10%
+            if i > 0 and (i % 10 == 0 or i == total - 1):
+                pct = int((i / total) * 100)
+                elapsed = time.time() - start
+                rate = i / elapsed if elapsed > 0 else 0
+                eta = (total - i) / rate if rate > 0 else 0
+                print(f"    [PRELOAD] {pct}% ({i}/{total}) - {loaded} OK, {errors} errors - ETA {eta:.0f}s", flush=True)
             try:
                 # Pre-load HTF (slow to download, but cached long)
                 self._get_cached(symbol, "60", 7)
@@ -119,10 +126,12 @@ class OBScalperLive:
                     self._get_cached(symbol, "D", 30)
                 loaded += 1
             except Exception as e:
-                print(f"    [PRELOAD] Skip {symbol}: {str(e)[:30]}")
+                errors += 1
+                if errors <= 3:  # Only show first 3 errors
+                    print(f"    [PRELOAD] Skip {symbol}: {str(e)[:30]}", flush=True)
 
         elapsed = time.time() - start
-        print(f"    [PRELOAD] Done! {loaded} coins in {elapsed:.1f}s")
+        print(f"    [PRELOAD] Done! {loaded}/{total} coins in {elapsed:.1f}s ({errors} errors)", flush=True)
         self._preloaded = True
 
     def _get_cached(self, symbol: str, interval: str, days: int):
