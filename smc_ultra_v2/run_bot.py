@@ -366,75 +366,91 @@ def run_scalper_live():
                 print(f"  Positions: {longs}L/{shorts}S | Pending: {len(pending_orders)}", flush=True)
                 print(f"  Cycle: {coin_index}/{len(coins)} | Signals this hour: {signals_found}", flush=True)
 
-            # === SCAN SINGLE COIN ===
+            # === SCAN SINGLE COIN (with hard timeout) ===
+            signal = None
             try:
-                signal = scanner.get_signal(symbol)
+                # Use signal.alarm for hard timeout (kills blocking I/O)
+                import signal as sig
 
-                if signal:
-                    # Check position limits
-                    positions = executor.get_all_positions()
-                    longs = sum(1 for p in positions if p.side == 'Buy')
-                    shorts = sum(1 for p in positions if p.side == 'Sell')
-                    pending_l = sum(1 for o in pending_orders.values() if o['direction'] == 'long')
-                    pending_s = sum(1 for o in pending_orders.values() if o['direction'] == 'short')
+                def timeout_handler(signum, frame):
+                    raise TimeoutError(f"{symbol} timeout")
 
-                    skip = False
-                    if signal.direction == 'long' and (longs + pending_l) >= MAX_LONGS:
-                        skip = True
-                    if signal.direction == 'short' and (shorts + pending_s) >= MAX_SHORTS:
-                        skip = True
-                    if any(o['symbol'] == signal.symbol for o in pending_orders.values()):
-                        skip = True
+                old_handler = sig.signal(sig.SIGALRM, timeout_handler)
+                sig.alarm(15)  # 15 second hard timeout
 
-                    if not skip:
-                        signals_found += 1
-                        print(f"\n★ {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}", flush=True)
-                        print(f"  SL: {signal.sl_price:.4f} | TP: {signal.tp_price:.4f}", flush=True)
+                try:
+                    signal = scanner.get_signal(symbol)
+                finally:
+                    sig.alarm(0)  # Cancel alarm
+                    sig.signal(sig.SIGALRM, old_handler)  # Restore handler
 
-                        if PAPER_MODE:
-                            sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
-                            print(f"  [PAPER] SL: {sl_pct:.2f}%, Lev: {signal.leverage}x", flush=True)
-                        else:
-                            # Place real order
-                            balance = executor.get_balance()
-                            equity = balance.get('available', 0)
-                            sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
-                            risk_usd = equity * (RISK_PER_TRADE_PCT / 100)
-                            qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
-                            qty = round(qty_usd / signal.entry_price, 3) if signal.entry_price > 0 else 0
-
-                            if qty > 0:
-                                executor.set_leverage(signal.symbol, signal.leverage)
-                                try:
-                                    response = executor.client.place_order(
-                                        category="linear",
-                                        symbol=signal.symbol,
-                                        side='Buy' if signal.direction == 'long' else 'Sell',
-                                        orderType="Limit",
-                                        price=str(round(signal.entry_price, 6)),
-                                        qty=str(qty),
-                                        timeInForce="PostOnly",
-                                        reduceOnly=False,
-                                        takeProfit=str(round(signal.tp_price, 6)),
-                                        stopLoss=str(round(signal.sl_price, 6)),
-                                        tpslMode="Full",
-                                        slOrderType="Market"
-                                    )
-                                    if response['retCode'] == 0:
-                                        order_id = response['result']['orderId']
-                                        pending_orders[order_id] = {
-                                            'symbol': signal.symbol,
-                                            'placed_at': now,
-                                            'direction': signal.direction
-                                        }
-                                        print(f"  [ORDER] {order_id[:8]}... qty={qty:.4f}", flush=True)
-                                    else:
-                                        print(f"  [ERR] {response['retMsg']}", flush=True)
-                                except Exception as e:
-                                    print(f"  [ERR] {str(e)[:50]}", flush=True)
-
+            except TimeoutError:
+                print(f"  [TIMEOUT] {symbol}", flush=True)
             except Exception as e:
-                pass  # Silent skip - don't spam errors
+                pass  # Silent skip
+
+            if signal:
+                # Check position limits
+                positions = executor.get_all_positions()
+                longs = sum(1 for p in positions if p.side == 'Buy')
+                shorts = sum(1 for p in positions if p.side == 'Sell')
+                pending_l = sum(1 for o in pending_orders.values() if o['direction'] == 'long')
+                pending_s = sum(1 for o in pending_orders.values() if o['direction'] == 'short')
+
+                skip = False
+                if signal.direction == 'long' and (longs + pending_l) >= MAX_LONGS:
+                    skip = True
+                if signal.direction == 'short' and (shorts + pending_s) >= MAX_SHORTS:
+                    skip = True
+                if any(o['symbol'] == signal.symbol for o in pending_orders.values()):
+                    skip = True
+
+                if not skip:
+                    signals_found += 1
+                    print(f"\n★ {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}", flush=True)
+                    print(f"  SL: {signal.sl_price:.4f} | TP: {signal.tp_price:.4f}", flush=True)
+
+                    if PAPER_MODE:
+                        sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
+                        print(f"  [PAPER] SL: {sl_pct:.2f}%, Lev: {signal.leverage}x", flush=True)
+                    else:
+                        # Place real order
+                        balance = executor.get_balance()
+                        equity = balance.get('available', 0)
+                        sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
+                        risk_usd = equity * (RISK_PER_TRADE_PCT / 100)
+                        qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
+                        qty = round(qty_usd / signal.entry_price, 3) if signal.entry_price > 0 else 0
+
+                        if qty > 0:
+                            executor.set_leverage(signal.symbol, signal.leverage)
+                            try:
+                                response = executor.client.place_order(
+                                    category="linear",
+                                    symbol=signal.symbol,
+                                    side='Buy' if signal.direction == 'long' else 'Sell',
+                                    orderType="Limit",
+                                    price=str(round(signal.entry_price, 6)),
+                                    qty=str(qty),
+                                    timeInForce="PostOnly",
+                                    reduceOnly=False,
+                                    takeProfit=str(round(signal.tp_price, 6)),
+                                    stopLoss=str(round(signal.sl_price, 6)),
+                                    tpslMode="Full",
+                                    slOrderType="Market"
+                                )
+                                if response['retCode'] == 0:
+                                    order_id = response['result']['orderId']
+                                    pending_orders[order_id] = {
+                                        'symbol': signal.symbol,
+                                        'placed_at': now,
+                                        'direction': signal.direction
+                                    }
+                                    print(f"  [ORDER] {order_id[:8]}... qty={qty:.4f}", flush=True)
+                                else:
+                                    print(f"  [ERR] {response['retMsg']}", flush=True)
+                            except Exception as e:
+                                print(f"  [ERR] {str(e)[:50]}", flush=True)
 
             # Next coin
             coin_index = (coin_index + 1) % len(coins)
