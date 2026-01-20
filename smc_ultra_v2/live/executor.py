@@ -98,8 +98,12 @@ class BybitExecutor:
                 usdt = next((c for c in coins if c['coin'] == 'USDT'), None)
                 if usdt:
                     equity = safe_float(usdt.get('equity'), 0)
-                    available = safe_float(usdt.get('availableToWithdraw'), 0)
+                    wallet_balance = safe_float(usdt.get('walletBalance'), 0)
+                    available_to_withdraw = safe_float(usdt.get('availableToWithdraw'), 0)
                     pnl = safe_float(usdt.get('unrealisedPnl'), 0)
+
+                    # Use walletBalance for trading, not availableToWithdraw
+                    available = wallet_balance if wallet_balance > 0 else equity
 
                     # Check if account has any balance
                     if equity == 0 and available == 0:
@@ -108,6 +112,7 @@ class BybitExecutor:
                     return {
                         'equity': equity,
                         'available': available,
+                        'wallet_balance': wallet_balance,
                         'unrealized_pnl': pnl
                     }
 
