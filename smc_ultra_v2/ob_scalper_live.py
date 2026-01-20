@@ -343,12 +343,14 @@ class OBScalperLive:
             print(f"Error checking {symbol}: {e}")
             return None
 
-    def scan_coins(self, coins: List[str], timeout_per_coin: int = 10) -> List[LiveSignal]:
-        """Scan multiple coins for signals with rate limiting"""
+    def scan_coins(self, coins: List[str], timeout_per_coin: int = 30) -> List[LiveSignal]:
+        """Scan multiple coins for signals with per-coin timeout"""
         import time
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         signals = []
         skipped = 0
+        slow_coins = []
         total = len(coins)
         scan_start = time.time()
 
@@ -365,16 +367,27 @@ class OBScalperLive:
 
             coin_start = time.time()
             try:
-                signal = self.get_signal(symbol)
+                # Use thread with timeout to prevent hanging
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(self.get_signal, symbol)
+                    signal = future.result(timeout=timeout_per_coin)
+
                 coin_time = time.time() - coin_start
 
                 if signal:
                     signals.append(signal)
                     print(f"  ★ {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}", flush=True)
+                elif coin_time > 10:
+                    slow_coins.append(symbol)
+
+            except FuturesTimeout:
+                skipped += 1
+                slow_coins.append(symbol)
+                print(f"  [TIMEOUT] {symbol} >{timeout_per_coin}s - skipping", flush=True)
 
             except Exception as e:
                 skipped += 1
-                if skipped <= 3:
+                if skipped <= 5:
                     print(f"  [skip] {symbol}: {str(e)[:30]}", flush=True)
 
             # Small delay every 5 coins to avoid rate limits
@@ -382,7 +395,7 @@ class OBScalperLive:
                 time.sleep(0.05)  # 50ms
 
         total_time = time.time() - scan_start
-        print(f"    Done: {len(signals)} signals in {total_time:.1f}s", flush=True)
+        print(f"    Done: {len(signals)} signals in {total_time:.1f}s ({skipped} skipped)", flush=True)
 
         return signals
 
