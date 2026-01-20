@@ -103,11 +103,23 @@ class OBScalperLive:
     def preload_data(self, coins: List[str]):
         """Pre-load HTF data for all coins to speed up scanning"""
         import time
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
         total = len(coins)
         print(f"    [PRELOAD] Loading HTF data for {total} coins...", flush=True)
         start = time.time()
         loaded = 0
         errors = 0
+        skipped = []
+
+        def load_single_coin(symbol):
+            """Load HTF data for a single coin"""
+            self._get_cached(symbol, "60", 3)   # 1H: 3 days
+            if USE_4H_MTF:
+                self._get_cached(symbol, "240", 7)   # 4H: 7 days
+            if USE_DAILY_FOR_SHORTS:
+                self._get_cached(symbol, "D", 14)    # Daily: 14 days
+            return True
 
         for i, symbol in enumerate(coins):
             # Progress every 10 coins
@@ -116,35 +128,35 @@ class OBScalperLive:
                 elapsed = time.time() - start
                 rate = i / elapsed if elapsed > 0 else 0
                 eta = (total - i) / rate if rate > 0 else 0
-                print(f"    [PRELOAD] {pct}% ({i}/{total}) - {loaded} OK, {errors} errors - ETA {eta:.0f}s", flush=True)
+                print(f"    [PRELOAD] {pct}% ({i}/{total}) - {loaded} OK, {errors} skip - ETA {eta:.0f}s", flush=True)
 
             try:
-                symbol_start = time.time()
-
-                # Pre-load HTF (minimal days needed, just for indicators)
-                self._get_cached(symbol, "60", 3)   # 1H: 3 days enough for EMA50
-                if USE_4H_MTF:
-                    self._get_cached(symbol, "240", 7)   # 4H: 7 days
-                if USE_DAILY_FOR_SHORTS:
-                    self._get_cached(symbol, "D", 14)    # Daily: 14 days
+                # Use thread with 30 second timeout per coin
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(load_single_coin, symbol)
+                    future.result(timeout=30)  # 30 second max per coin
                 loaded += 1
 
-                # Warn if single symbol took too long
-                symbol_time = time.time() - symbol_start
-                if symbol_time > 15:
-                    print(f"    [PRELOAD] {symbol} slow: {symbol_time:.1f}s", flush=True)
+            except FuturesTimeout:
+                errors += 1
+                skipped.append(symbol)
+                if errors <= 3:
+                    print(f"    [PRELOAD] TIMEOUT {symbol} (>30s)", flush=True)
 
             except Exception as e:
                 errors += 1
-                if errors <= 5:  # Show first 5 errors
-                    print(f"    [PRELOAD] Skip {symbol}: {str(e)[:40]}", flush=True)
+                skipped.append(symbol)
+                if errors <= 3:
+                    print(f"    [PRELOAD] Skip {symbol}: {str(e)[:30]}", flush=True)
 
             # Small delay every 5 coins to avoid rate limits
             if i > 0 and i % 5 == 0:
-                time.sleep(0.2)  # 200ms pause every 5 coins
+                time.sleep(0.1)  # 100ms pause
 
         elapsed = time.time() - start
-        print(f"    [PRELOAD] Done! {loaded}/{total} coins in {elapsed:.1f}s ({errors} errors)", flush=True)
+        print(f"    [PRELOAD] Done! {loaded}/{total} coins in {elapsed:.1f}s", flush=True)
+        if skipped:
+            print(f"    [PRELOAD] Skipped: {', '.join(skipped[:5])}{'...' if len(skipped) > 5 else ''}", flush=True)
         self._preloaded = True
 
     def _get_cached(self, symbol: str, interval: str, days: int):
