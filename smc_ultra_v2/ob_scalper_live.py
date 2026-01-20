@@ -110,25 +110,38 @@ class OBScalperLive:
         errors = 0
 
         for i, symbol in enumerate(coins):
-            # Progress every 10 coins or 10%
+            # Progress every 10 coins
             if i > 0 and (i % 10 == 0 or i == total - 1):
                 pct = int((i / total) * 100)
                 elapsed = time.time() - start
                 rate = i / elapsed if elapsed > 0 else 0
                 eta = (total - i) / rate if rate > 0 else 0
                 print(f"    [PRELOAD] {pct}% ({i}/{total}) - {loaded} OK, {errors} errors - ETA {eta:.0f}s", flush=True)
+
             try:
-                # Pre-load HTF (slow to download, but cached long)
-                self._get_cached(symbol, "60", 7)
+                symbol_start = time.time()
+
+                # Pre-load HTF (minimal days needed, just for indicators)
+                self._get_cached(symbol, "60", 3)   # 1H: 3 days enough for EMA50
                 if USE_4H_MTF:
-                    self._get_cached(symbol, "240", 14)
+                    self._get_cached(symbol, "240", 7)   # 4H: 7 days
                 if USE_DAILY_FOR_SHORTS:
-                    self._get_cached(symbol, "D", 30)
+                    self._get_cached(symbol, "D", 14)    # Daily: 14 days
                 loaded += 1
+
+                # Warn if single symbol took too long
+                symbol_time = time.time() - symbol_start
+                if symbol_time > 15:
+                    print(f"    [PRELOAD] {symbol} slow: {symbol_time:.1f}s", flush=True)
+
             except Exception as e:
                 errors += 1
-                if errors <= 3:  # Only show first 3 errors
-                    print(f"    [PRELOAD] Skip {symbol}: {str(e)[:30]}", flush=True)
+                if errors <= 5:  # Show first 5 errors
+                    print(f"    [PRELOAD] Skip {symbol}: {str(e)[:40]}", flush=True)
+
+            # Small delay every 5 coins to avoid rate limits
+            if i > 0 and i % 5 == 0:
+                time.sleep(0.2)  # 200ms pause every 5 coins
 
         elapsed = time.time() - start
         print(f"    [PRELOAD] Done! {loaded}/{total} coins in {elapsed:.1f}s ({errors} errors)", flush=True)
