@@ -323,7 +323,7 @@ def run_scalper_live():
     # Filter known problematic coins (hang during API calls on Railway)
     SKIP = {
         'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'FHEUSDT',
-        'WHITEWHALEUSDT', 'LITUSDT',  # Confirmed hanging on Railway
+        'WHITEWHALEUSDT', 'LITUSDT', 'ZKPUSDT',  # Confirmed hanging
     }
     coins = [c for c in coins if c not in SKIP]
 
@@ -429,9 +429,28 @@ def run_scalper_live():
                         balance = executor.get_balance()
                         equity = balance.get('available', 0)
                         sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
+
+                        # Calculate qty based on risk
                         risk_usd = equity * (RISK_PER_TRADE_PCT / 100)
                         qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
-                        qty = round(qty_usd / signal.entry_price, 3) if signal.entry_price > 0 else 0
+
+                        # Cap position size to 80% of available margin * leverage
+                        max_position_usd = equity * 0.8 * signal.leverage
+                        if qty_usd > max_position_usd:
+                            qty_usd = max_position_usd
+                            print(f"  [CAP] Position capped to ${qty_usd:.0f}", flush=True)
+
+                        qty = qty_usd / signal.entry_price if signal.entry_price > 0 else 0
+
+                        # Round to appropriate precision (most coins: 0-3 decimals)
+                        if signal.entry_price > 100:
+                            qty = round(qty, 2)  # BTC, ETH etc
+                        elif signal.entry_price > 1:
+                            qty = round(qty, 1)  # Mid-price coins
+                        else:
+                            qty = round(qty, 0)  # Low price coins - whole numbers
+
+                        print(f"  [CALC] qty={qty}, notional=${qty*signal.entry_price:.0f}, margin=${qty*signal.entry_price/signal.leverage:.0f}", flush=True)
 
                         if qty > 0:
                             executor.set_leverage(signal.symbol, signal.leverage)
