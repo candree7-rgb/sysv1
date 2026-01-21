@@ -74,8 +74,6 @@ def send_trade_opened(
     tp2_price: float,
     leverage: int,
     risk_pct: float,
-    ob_strength: float = None,
-    ob_age: int = None,
 ) -> bool:
     """
     Send notification when new trade is opened.
@@ -110,11 +108,6 @@ def send_trade_opened(
         "",
         f"Risk: {risk_pct:.1f}%",
     ]
-
-    if ob_strength:
-        lines.append(f"OB Strength: {ob_strength:.2f}")
-    if ob_age:
-        lines.append(f"OB Age: {ob_age} candles")
 
     lines.append("")
     lines.append(f"<i>{BOT_NAME}</i>")

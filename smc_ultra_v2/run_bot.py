@@ -962,8 +962,6 @@ def run_scalper_live():
                                                 tp2_price=signal.tp_price,
                                                 leverage=signal.leverage,
                                                 risk_pct=RISK_PER_TRADE_PCT,
-                                                ob_strength=signal.ob_strength,
-                                                ob_age=signal.ob_age_candles,
                                             )
 
                                             trade_pairs[signal.symbol] = {
