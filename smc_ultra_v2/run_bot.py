@@ -284,6 +284,9 @@ def run_scalper_live():
     from live.executor import BybitExecutor
     print("[INIT] BybitExecutor imported", flush=True)
     from config.coins import get_top_n_coins
+    print("[INIT] Coins imported", flush=True)
+    from live.trade_logger import get_trade_logger, TradeRecord
+    trade_logger = get_trade_logger()
     print("[INIT] All imports done", flush=True)
 
     print("[INIT] Creating scanner...", flush=True)
@@ -362,6 +365,41 @@ def run_scalper_live():
                 # Check if TP2 order was filled (order2) - trade complete
                 elif order_id == pair.get('order2'):
                     print(f"\n  [TP2 HIT] {symbol} - Trade complete!", flush=True)
+
+                    # Log exit to Supabase
+                    if pair.get('db_trade_id'):
+                        try:
+                            balance = executor.get_balance()
+                            equity_now = balance.get('available', 0)
+
+                            # Calculate PnL (approximate)
+                            entry = pair['entry']
+                            tp2 = pair.get('tp2_price', entry)
+                            direction = pair['direction']
+                            margin = pair.get('margin_used', 0)
+
+                            if direction == 'long':
+                                pnl_pct = (tp2 - entry) / entry * 100
+                            else:
+                                pnl_pct = (entry - tp2) / entry * 100
+
+                            realized_pnl = margin * (pnl_pct / 100) * pair.get('qty', 0) / margin if margin else 0
+
+                            trade_logger.log_exit(
+                                trade_id=pair['db_trade_id'],
+                                exit_price=tp2,
+                                exit_time=datetime.utcnow(),
+                                exit_reason='tp2',
+                                realized_pnl=realized_pnl,
+                                equity_at_close=equity_now,
+                                tp1_hit=pair.get('tp1_filled', False),
+                                tp2_hit=True,
+                                entry_time=pair.get('entry_time'),
+                                margin_used=margin,
+                            )
+                        except Exception as e:
+                            print(f"  [DB ERR] {str(e)[:40]}", flush=True)
+
                     del trade_pairs[symbol]
 
         except Exception as e:
@@ -726,12 +764,43 @@ def run_scalper_live():
 
                                         # Register trade pair for WebSocket monitoring (SL→BE after TP1)
                                         if resp1['retCode'] == 0:
+                                            # Log to Supabase
+                                            trade_record = TradeRecord(
+                                                symbol=signal.symbol,
+                                                direction=signal.direction,
+                                                entry_price=signal.entry_price,
+                                                entry_time=now,
+                                                qty=qty,
+                                                leverage=signal.leverage,
+                                                margin_used=qty * signal.entry_price / signal.leverage,
+                                                equity_at_entry=equity,
+                                                sl_price=signal.sl_price,
+                                                tp1_price=signal.partial_tp_price,
+                                                tp2_price=signal.tp_price,
+                                                order_id_1=oid1,
+                                                order_id_2=oid2,
+                                                ob_strength=signal.ob_strength,
+                                                ob_age_candles=signal.ob_age_candles,
+                                                risk_pct=RISK_PER_TRADE_PCT,
+                                                hour_utc=now.hour,
+                                                day_of_week=now.weekday(),
+                                            )
+                                            db_trade_id = trade_logger.log_entry(trade_record)
+
                                             trade_pairs[signal.symbol] = {
                                                 'order1': oid1,  # TP1 order
                                                 'order2': oid2,  # TP2 order
                                                 'entry': signal.entry_price,
                                                 'direction': signal.direction,
-                                                'tp1_filled': False
+                                                'tp1_filled': False,
+                                                'tp1_price': signal.partial_tp_price,
+                                                'tp2_price': signal.tp_price,
+                                                'sl_price': signal.sl_price,
+                                                'qty': qty,
+                                                'margin_used': qty * signal.entry_price / signal.leverage,
+                                                'entry_time': now,
+                                                'db_trade_id': db_trade_id,  # For exit logging
+                                                'equity_at_entry': equity,
                                             }
                                             print(f"  [TRACK] Registered for SL→BE monitoring", flush=True)
                                     else:
