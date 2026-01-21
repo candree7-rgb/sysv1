@@ -287,6 +287,10 @@ def run_scalper_live():
     print("[INIT] Coins imported", flush=True)
     from live.trade_logger import get_trade_logger, TradeRecord
     trade_logger = get_trade_logger()
+    print("[INIT] Trade logger ready", flush=True)
+    from live import telegram_alerts as tg
+    if tg.is_enabled():
+        print("[INIT] Telegram alerts enabled", flush=True)
     print("[INIT] All imports done", flush=True)
 
     print("[INIT] Creating scanner...", flush=True)
@@ -357,6 +361,14 @@ def run_scalper_live():
                         )
                         if response['retCode'] == 0:
                             print(f"  [BE+ SET] {symbol} SL → {new_sl:.6f} (0.1% locked)", flush=True)
+
+                            # Send TP1 Telegram alert
+                            tp1_price = pair.get('tp1_price', entry_price)
+                            if direction == 'long':
+                                partial_pnl = (tp1_price - entry_price) / entry_price * 100
+                            else:
+                                partial_pnl = (entry_price - tp1_price) / entry_price * 100
+                            tg.send_tp1_hit(symbol, direction, entry_price, tp1_price, partial_pnl)
                         else:
                             print(f"  [WARN] SL modify failed: {response.get('retMsg', 'unknown')}", flush=True)
                     except Exception as e:
@@ -396,6 +408,21 @@ def run_scalper_live():
                                 tp2_hit=True,
                                 entry_time=pair.get('entry_time'),
                                 margin_used=margin,
+                            )
+
+                            # Send Telegram close alert
+                            duration_mins = None
+                            if pair.get('entry_time'):
+                                duration_mins = int((datetime.utcnow() - pair['entry_time']).total_seconds() / 60)
+                            tg.send_trade_closed(
+                                symbol=symbol,
+                                direction=direction,
+                                entry_price=entry,
+                                exit_price=tp2,
+                                pnl_pct=pnl_pct,
+                                exit_reason='tp2',
+                                tp_hits='2/2' if pair.get('tp1_filled') else '1/2',
+                                duration_mins=duration_mins,
                             )
                         except Exception as e:
                             print(f"  [DB ERR] {str(e)[:40]}", flush=True)
@@ -519,6 +546,13 @@ def run_scalper_live():
         except Exception as e:
             print(f"  [WARN] Could not load positions: {e}", flush=True)
 
+    # Send Telegram bot started notification
+    tg.send_bot_started(
+        equity=available,
+        active_positions=len(existing_position_symbols),
+        pending_orders=len(pending_orders),
+    )
+
     # === ROLLING SCAN: Scan coins continuously, one at a time ===
     SCAN_DELAY = 2.5  # seconds between each coin
     coin_index = 0
@@ -568,8 +602,79 @@ def run_scalper_live():
 
                 # Show status
                 positions = executor.get_all_positions()
+                position_symbols = {p.symbol for p in positions}
                 longs = sum(1 for p in positions if p.side == 'Buy')
                 shorts = sum(1 for p in positions if p.side == 'Sell')
+
+                # === SL/BE EXIT DETECTION: Check if tracked trades closed ===
+                for sym in list(trade_pairs.keys()):
+                    if sym not in position_symbols:
+                        # Position closed (SL or BE+ hit)
+                        pair = trade_pairs[sym]
+                        entry = pair.get('entry', 0)
+                        direction = pair.get('direction', 'long')
+                        sl_price = pair.get('sl_price', entry)
+                        tp1_filled = pair.get('tp1_filled', False)
+
+                        # Determine exit type and approximate PnL
+                        if tp1_filled:
+                            # TP1 was hit, then BE+ was hit
+                            exit_reason = 'be+'
+                            exit_price = entry * 1.001 if direction == 'long' else entry * 0.999
+                            pnl_pct = 0.1  # Locked 0.1% profit
+                            tp_hits = '1/2'
+                        else:
+                            # Pure SL hit
+                            exit_reason = 'sl'
+                            exit_price = sl_price
+                            if direction == 'long':
+                                pnl_pct = (sl_price - entry) / entry * 100
+                            else:
+                                pnl_pct = (entry - sl_price) / entry * 100
+                            tp_hits = '0/2'
+
+                        print(f"  [EXIT] {sym} - {exit_reason.upper()} hit", flush=True)
+
+                        # Log to Supabase
+                        if pair.get('db_trade_id'):
+                            try:
+                                balance = executor.get_balance()
+                                equity_now = balance.get('available', 0)
+                                margin = pair.get('margin_used', 0)
+                                realized_pnl = margin * (pnl_pct / 100) if margin else 0
+
+                                trade_logger.log_exit(
+                                    trade_id=pair['db_trade_id'],
+                                    exit_price=exit_price,
+                                    exit_time=datetime.utcnow(),
+                                    exit_reason=exit_reason,
+                                    realized_pnl=realized_pnl,
+                                    equity_at_close=equity_now,
+                                    tp1_hit=tp1_filled,
+                                    tp2_hit=False,
+                                    entry_time=pair.get('entry_time'),
+                                    margin_used=margin,
+                                )
+                            except Exception as e:
+                                print(f"  [DB ERR] {str(e)[:40]}", flush=True)
+
+                        # Send Telegram alert
+                        duration_mins = None
+                        if pair.get('entry_time'):
+                            duration_mins = int((datetime.utcnow() - pair['entry_time']).total_seconds() / 60)
+                        tg.send_trade_closed(
+                            symbol=sym,
+                            direction=direction,
+                            entry_price=entry,
+                            exit_price=exit_price,
+                            pnl_pct=pnl_pct,
+                            exit_reason=exit_reason,
+                            tp_hits=tp_hits,
+                            duration_mins=duration_mins,
+                        )
+
+                        del trade_pairs[sym]
+
                 print(f"  Positions: {longs}L/{shorts}S | Pending: {len(pending_orders)}", flush=True)
                 print(f"  Cycle: {coin_index}/{len(coins)} | Signals: {signals_found}", flush=True)
                 if runtime_skip:
@@ -786,6 +891,20 @@ def run_scalper_live():
                                                 day_of_week=now.weekday(),
                                             )
                                             db_trade_id = trade_logger.log_entry(trade_record)
+
+                                            # Send Telegram alert
+                                            tg.send_trade_opened(
+                                                symbol=signal.symbol,
+                                                direction=signal.direction,
+                                                entry_price=signal.entry_price,
+                                                sl_price=signal.sl_price,
+                                                tp1_price=signal.partial_tp_price,
+                                                tp2_price=signal.tp_price,
+                                                leverage=signal.leverage,
+                                                risk_pct=RISK_PER_TRADE_PCT,
+                                                ob_strength=signal.ob_strength,
+                                                ob_age=signal.ob_age_candles,
+                                            )
 
                                             trade_pairs[signal.symbol] = {
                                                 'order1': oid1,  # TP1 order
