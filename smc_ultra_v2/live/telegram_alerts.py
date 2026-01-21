@@ -27,7 +27,7 @@ log = logging.getLogger("telegram")
 # Config
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
-BOT_NAME = os.getenv('BOT_NAME', 'OB Scalper')
+BOT_NAME = os.getenv('BOT_NAME', 'AI Scalper')
 TIMEZONE = ZoneInfo('Europe/Berlin')  # German time for summaries
 
 
