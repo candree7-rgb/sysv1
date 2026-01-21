@@ -871,6 +871,7 @@ def run_scalper_live():
 
                                 try:
                                     # Order 1: Partial TP (closes first at 50% of target)
+                                    # tpslMode="Partial" = TP/SL only applies to THIS order's qty
                                     resp1 = executor.client.place_order(
                                         category="linear",
                                         symbol=signal.symbol,
@@ -882,11 +883,12 @@ def run_scalper_live():
                                         reduceOnly=False,
                                         takeProfit=str(round(signal.partial_tp_price, 6)),
                                         stopLoss=str(round(signal.sl_price, 6)),
-                                        tpslMode="Full",
+                                        tpslMode="Partial",
                                         slOrderType="Market"
                                     )
 
                                     # Order 2: Full TP (runs to full target)
+                                    # tpslMode="Partial" = TP/SL only applies to THIS order's qty
                                     resp2 = executor.client.place_order(
                                         category="linear",
                                         symbol=signal.symbol,
@@ -898,7 +900,7 @@ def run_scalper_live():
                                         reduceOnly=False,
                                         takeProfit=str(round(signal.tp_price, 6)),
                                         stopLoss=str(round(signal.sl_price, 6)),
-                                        tpslMode="Full",
+                                        tpslMode="Partial",
                                         slOrderType="Market"
                                     )
 
