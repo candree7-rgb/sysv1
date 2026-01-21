@@ -639,6 +639,10 @@ def run_scalper_live():
                             # Mark this OB as used so we don't trade it again!
                             if 'ob_key' in info:
                                 used_obs.add(info['ob_key'])
+                            # Mark trade as filled for exit detection
+                            sym = info['symbol']
+                            if sym in trade_pairs:
+                                trade_pairs[sym]['filled'] = True
                             print(f"  [FILLED] {info['symbol']} {info['direction'].upper()}!", flush=True)
 
                 # Show status
@@ -649,9 +653,22 @@ def run_scalper_live():
 
                 # === SL/BE EXIT DETECTION: Check if tracked trades closed ===
                 for sym in list(trade_pairs.keys()):
+                    pair = trade_pairs[sym]
+
+                    # Skip if orders for this symbol are still pending (not filled yet)
+                    if not pair.get('filled', False):
+                        # Check if any pending orders exist for this symbol
+                        has_pending = any(o['symbol'] == sym for o in pending_orders.values())
+                        if has_pending:
+                            continue  # Still waiting for fill, not a real exit
+                        # If no pending orders and no position, mark as filled (order filled and position exists somewhere)
+                        if sym in position_symbols:
+                            pair['filled'] = True
+                            print(f"  [FILLED] {sym} position detected, tracking for exit", flush=True)
+                        continue  # Either way, don't trigger exit yet
+
                     if sym not in position_symbols:
                         # Position closed (SL or BE+ hit)
-                        pair = trade_pairs[sym]
                         entry = pair.get('entry', 0)
                         direction = pair.get('direction', 'long')
                         sl_price = pair.get('sl_price', entry)
