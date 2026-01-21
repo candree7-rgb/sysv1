@@ -46,8 +46,26 @@ MAX_SHORTS = int(os.getenv('MAX_SHORTS', '2'))  # Max 2 short trades
 BACKTEST_DAYS = int(os.getenv('BACKTEST_DAYS', '90'))  # Days to backtest (90 for better sample)
 
 
+def _download_single_coin(symbol, days, result_queue):
+    """Download a single coin with timeout support (runs in subprocess)"""
+    try:
+        from data import BybitDataDownloader
+        dl = BybitDataDownloader()
+        df = dl.download_coin(symbol, interval="5", days=days)
+        if df is not None and len(df) > 0:
+            filepath = dl.get_cache_path(symbol, "5", days)
+            df.to_parquet(filepath)
+            result_queue.put(('ok', len(df)))
+        else:
+            result_queue.put(('empty', 0))
+    except Exception as e:
+        result_queue.put(('error', str(e)))
+
+
 def download_minimal_data():
     """Download just enough data to start trading"""
+    import multiprocessing as mp
+
     print("=" * 60)
     print("SMC ULTRA V2 - RAILWAY STARTUP")
     print("=" * 60)
@@ -57,10 +75,7 @@ def download_minimal_data():
     print(f"Time: {datetime.utcnow()}")
     print("=" * 60)
 
-    from data import BybitDataDownloader
     from config.coins import get_top_n_coins
-
-    dl = BybitDataDownloader()
 
     # Get top coins
     coins = get_top_n_coins(NUM_COINS)
@@ -68,7 +83,11 @@ def download_minimal_data():
 
     # Download 7 days of 5min data (fast, enough for live)
     # Known problematic coins that often timeout/have no data
-    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT', 'FHEUSDT'}
+    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT', 'FHEUSDT', 'SKRUSDT'}
+
+    # Runtime skip: coins that timeout get added here automatically
+    runtime_skip = set()
+    DOWNLOAD_TIMEOUT = 30  # seconds per coin
 
     successful = 0
     try:
@@ -79,20 +98,42 @@ def download_minimal_data():
                     print(f"  [{i+1}/{len(coins)}] {symbol}... SKIP (known issue)", flush=True)
                     continue
 
+                # Skip coins that timed out previously
+                if symbol in runtime_skip:
+                    print(f"  [{i+1}/{len(coins)}] {symbol}... SKIP (auto-skip)", flush=True)
+                    continue
+
                 print(f"  [{i+1}/{len(coins)}] {symbol}...", end="", flush=True)
 
-                df = dl.download_coin(symbol, interval="5", days=7)
-                if len(df) > 0:
-                    filepath = dl.get_cache_path(symbol, "5", 7)
-                    df.to_parquet(filepath)
-                    print(f" OK ({len(df)} bars)", flush=True)
-                    successful += 1
+                # Use subprocess with timeout (like scanning does)
+                result_queue = mp.Queue()
+                proc = mp.Process(target=_download_single_coin, args=(symbol, 7, result_queue))
+                proc.start()
+                proc.join(timeout=DOWNLOAD_TIMEOUT)
+
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join()
+                    print(" TIMEOUT!", flush=True)
+                    runtime_skip.add(symbol)  # Auto-skip on timeout
+                elif not result_queue.empty():
+                    status, data = result_queue.get_nowait()
+                    if status == 'ok':
+                        print(f" OK ({data} bars)", flush=True)
+                        successful += 1
+                    elif status == 'empty':
+                        print(" SKIP (no data)", flush=True)
+                    else:
+                        print(f" ERROR: {data}", flush=True)
                 else:
-                    print(" SKIP (no data)", flush=True)
+                    print(" SKIP (no result)", flush=True)
+
             except Exception as e:
                 print(f" ERROR: {e}", flush=True)
 
         print(f"\nData download complete! ({successful} coins loaded)", flush=True)
+        if runtime_skip:
+            print(f"Auto-skipped (timeout): {', '.join(runtime_skip)}", flush=True)
     except Exception as e:
         print(f"\nDownload loop error: {e}", flush=True)
         print(f"Continuing with {successful} coins...", flush=True)
