@@ -9,20 +9,27 @@ import { TimeRange, TIME_RANGES } from './time-range-selector'
 
 interface EquityChartProps {
   timeRange: TimeRange
+  customDateRange?: { from: string; to: string } | null
 }
 
-export default function EquityChart({ timeRange }: EquityChartProps) {
+export default function EquityChart({ timeRange, customDateRange }: EquityChartProps) {
   const [data, setData] = useState<EquityPoint[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     async function fetchEquity() {
       try {
-        const range = TIME_RANGES.find(r => r.value === timeRange)
-        const days = range?.days
-        const params = days ? `?days=${days}` : ''
+        const params = new URLSearchParams()
 
-        const res = await fetch(`/api/equity${params}`)
+        if (timeRange === 'CUSTOM' && customDateRange) {
+          params.append('from', customDateRange.from)
+          params.append('to', customDateRange.to)
+        } else {
+          const range = TIME_RANGES.find(r => r.value === timeRange)
+          if (range?.days) params.append('days', range.days.toString())
+        }
+
+        const res = await fetch(`/api/equity?${params.toString()}`)
         const equity = await res.json()
         setData(equity)
       } catch (error) {
@@ -36,7 +43,7 @@ export default function EquityChart({ timeRange }: EquityChartProps) {
     fetchEquity()
     const interval = setInterval(fetchEquity, 60000)
     return () => clearInterval(interval)
-  }, [timeRange])
+  }, [timeRange, customDateRange])
 
   if (loading) {
     return (

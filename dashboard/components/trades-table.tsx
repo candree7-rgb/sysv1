@@ -7,19 +7,25 @@ import { TimeRange, TIME_RANGES } from './time-range-selector'
 
 interface TradesTableProps {
   timeRange: TimeRange
+  customDateRange?: { from: string; to: string } | null
 }
 
-export default function TradesTable({ timeRange }: TradesTableProps) {
+export default function TradesTable({ timeRange, customDateRange }: TradesTableProps) {
   const [trades, setTrades] = useState<Trade[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     async function fetchTrades() {
       try {
-        const range = TIME_RANGES.find(r => r.value === timeRange)
-        const days = range?.days
         const params = new URLSearchParams({ limit: '50' })
-        if (days) params.append('days', days.toString())
+
+        if (timeRange === 'CUSTOM' && customDateRange) {
+          params.append('from', customDateRange.from)
+          params.append('to', customDateRange.to)
+        } else {
+          const range = TIME_RANGES.find(r => r.value === timeRange)
+          if (range?.days) params.append('days', range.days.toString())
+        }
 
         const res = await fetch(`/api/trades?${params.toString()}`)
         const data = await res.json()
@@ -35,7 +41,7 @@ export default function TradesTable({ timeRange }: TradesTableProps) {
     fetchTrades()
     const interval = setInterval(fetchTrades, 30000)
     return () => clearInterval(interval)
-  }, [timeRange])
+  }, [timeRange, customDateRange])
 
   if (loading) {
     return (

@@ -7,6 +7,8 @@ export async function GET(request: Request) {
     const limit = parseInt(searchParams.get('limit') || '50')
     const daysParam = searchParams.get('days')
     const days = daysParam ? parseInt(daysParam) : undefined
+    const fromParam = searchParams.get('from')
+    const toParam = searchParams.get('to')
 
     // Build query
     let query = supabase
@@ -16,8 +18,11 @@ export async function GET(request: Request) {
       .order('exit_time', { ascending: false })
       .limit(limit)
 
-    // Filter by date if days specified
-    if (days) {
+    // Filter by custom date range or days
+    if (fromParam && toParam) {
+      query = query.gte('exit_time', `${fromParam}T00:00:00`)
+      query = query.lte('exit_time', `${toParam}T23:59:59`)
+    } else if (days) {
       const fromDate = new Date()
       fromDate.setDate(fromDate.getDate() - days)
       query = query.gte('exit_time', fromDate.toISOString())

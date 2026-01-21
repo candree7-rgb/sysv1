@@ -6,6 +6,7 @@ import { TimeRange, TIME_RANGES } from './time-range-selector'
 
 interface TPDistributionProps {
   timeRange: TimeRange
+  customDateRange?: { from: string; to: string } | null
 }
 
 interface TPData {
@@ -14,18 +15,24 @@ interface TPData {
   percentage: number
 }
 
-export default function TPDistributionChart({ timeRange }: TPDistributionProps) {
+export default function TPDistributionChart({ timeRange, customDateRange }: TPDistributionProps) {
   const [data, setData] = useState<TPData[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     async function fetchData() {
       try {
-        const range = TIME_RANGES.find(r => r.value === timeRange)
-        const days = range?.days
-        const params = days ? `?days=${days}` : ''
+        const params = new URLSearchParams()
 
-        const res = await fetch(`/api/tp-distribution${params}`)
+        if (timeRange === 'CUSTOM' && customDateRange) {
+          params.append('from', customDateRange.from)
+          params.append('to', customDateRange.to)
+        } else {
+          const range = TIME_RANGES.find(r => r.value === timeRange)
+          if (range?.days) params.append('days', range.days.toString())
+        }
+
+        const res = await fetch(`/api/tp-distribution?${params.toString()}`)
         const distribution = await res.json()
         setData(distribution)
       } catch (error) {
@@ -39,7 +46,7 @@ export default function TPDistributionChart({ timeRange }: TPDistributionProps) 
     fetchData()
     const interval = setInterval(fetchData, 60000)
     return () => clearInterval(interval)
-  }, [timeRange])
+  }, [timeRange, customDateRange])
 
   if (loading) {
     return (

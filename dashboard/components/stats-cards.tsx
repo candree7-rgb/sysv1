@@ -7,20 +7,27 @@ import { TimeRange, TIME_RANGES } from './time-range-selector'
 
 interface StatsCardsProps {
   timeRange: TimeRange
+  customDateRange?: { from: string; to: string } | null
 }
 
-export default function StatsCards({ timeRange }: StatsCardsProps) {
+export default function StatsCards({ timeRange, customDateRange }: StatsCardsProps) {
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     async function fetchStats() {
       try {
-        const range = TIME_RANGES.find(r => r.value === timeRange)
-        const days = range?.days
-        const params = days ? `?days=${days}` : ''
+        const params = new URLSearchParams()
 
-        const res = await fetch(`/api/stats${params}`)
+        if (timeRange === 'CUSTOM' && customDateRange) {
+          params.append('from', customDateRange.from)
+          params.append('to', customDateRange.to)
+        } else {
+          const range = TIME_RANGES.find(r => r.value === timeRange)
+          if (range?.days) params.append('days', range.days.toString())
+        }
+
+        const res = await fetch(`/api/stats?${params.toString()}`)
         const data = await res.json()
         setStats(data)
       } catch (error) {
@@ -34,7 +41,7 @@ export default function StatsCards({ timeRange }: StatsCardsProps) {
     fetchStats()
     const interval = setInterval(fetchStats, 30000)
     return () => clearInterval(interval)
-  }, [timeRange])
+  }, [timeRange, customDateRange])
 
   if (loading) {
     return (
