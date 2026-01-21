@@ -643,6 +643,20 @@ def run_scalper_live():
                             sym = info['symbol']
                             if sym in trade_pairs:
                                 trade_pairs[sym]['filled'] = True
+                                # Send Telegram notification ONLY when order is filled
+                                if not trade_pairs[sym].get('tg_notified', False):
+                                    trade_pairs[sym]['tg_notified'] = True
+                                    pair = trade_pairs[sym]
+                                    tg.send_trade_opened(
+                                        symbol=sym,
+                                        direction=pair['direction'],
+                                        entry_price=pair['entry'],
+                                        sl_price=pair['sl_price'],
+                                        tp1_price=pair['tp1_price'],
+                                        tp2_price=pair['tp2_price'],
+                                        leverage=pair.get('leverage', 5),
+                                        risk_pct=RISK_PER_TRADE_PCT,
+                                    )
                             print(f"  [FILLED] {info['symbol']} {info['direction'].upper()}!", flush=True)
 
                 # Show status
@@ -952,17 +966,8 @@ def run_scalper_live():
                                             )
                                             db_trade_id = trade_logger.log_entry(trade_record)
 
-                                            # Send Telegram alert
-                                            tg.send_trade_opened(
-                                                symbol=signal.symbol,
-                                                direction=signal.direction,
-                                                entry_price=signal.entry_price,
-                                                sl_price=signal.sl_price,
-                                                tp1_price=signal.partial_tp_price,
-                                                tp2_price=signal.tp_price,
-                                                leverage=signal.leverage,
-                                                risk_pct=RISK_PER_TRADE_PCT,
-                                            )
+                                            # Note: Telegram alert is sent when order FILLS, not when placed
+                                            # See fill detection section for tg.send_trade_opened()
 
                                             trade_pairs[signal.symbol] = {
                                                 'order1': oid1,  # TP1 order
@@ -973,6 +978,7 @@ def run_scalper_live():
                                                 'tp1_price': signal.partial_tp_price,
                                                 'tp2_price': signal.tp_price,
                                                 'sl_price': signal.sl_price,
+                                                'leverage': signal.leverage,  # For TG notification
                                                 'qty': qty,
                                                 'margin_used': qty * signal.entry_price / signal.leverage,
                                                 'entry_time': now,
