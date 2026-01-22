@@ -843,6 +843,7 @@ def run_scalper_live():
                 selected_longs = long_signals[:long_slots]
                 selected_shorts = short_signals[:short_slots]
                 selected = selected_longs + selected_shorts
+                total_signals_in_batch = len(long_signals) + len(short_signals)  # For ML tracking
 
                 if selected:
                     print(f"[BATCH] Selected: {len(selected_longs)}L/{len(selected_shorts)}S (slots: {long_slots}L/{short_slots}S)", flush=True)
@@ -996,6 +997,10 @@ def run_scalper_live():
                                                 risk_pct=RISK_PER_TRADE_PCT,
                                                 hour_utc=now.hour,
                                                 day_of_week=now.weekday(),
+                                                # Batch scan features for ML
+                                                distance_to_entry_pct=signal.distance_to_entry_pct,
+                                                signal_score=signal.score,
+                                                competing_signals=total_signals_in_batch,
                                             )
                                             db_trade_id = trade_logger.log_entry(trade_record)
 

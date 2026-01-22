@@ -67,6 +67,11 @@ class TradeRecord:
     risk_pct: float = None
     risk_amount: float = None
 
+    # === BATCH SCAN FEATURES (for ML signal selection) ===
+    distance_to_entry_pct: float = None  # How far price was from entry
+    signal_score: float = None  # Calculated ranking score
+    competing_signals: int = None  # How many other signals in this batch
+
 
 class TradeLogger:
     """
@@ -142,6 +147,11 @@ class TradeLogger:
                 'is_ny_session': is_ny,
                 'risk_pct': trade.risk_pct,
                 'risk_amount': trade.risk_amount,
+
+                # Batch scan features (for ML signal selection)
+                'distance_to_entry_pct': trade.distance_to_entry_pct,
+                'signal_score': trade.signal_score,
+                'competing_signals': trade.competing_signals,
             }
 
             # Remove None values
