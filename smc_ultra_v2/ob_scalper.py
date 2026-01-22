@@ -648,34 +648,72 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
 
     print(f"Testing {len(coins)} coins (skipped {len(SKIP_COINS)} problematic)...")
 
-    # Process coins in parallel
+    # Process coins with per-coin timeout (same as live)
+    import multiprocessing as mp
+    COIN_TIMEOUT = 60  # seconds per coin
+
+    def process_coin_worker(coin, days, result_queue):
+        """Worker that runs in subprocess - can be killed on timeout"""
+        try:
+            trades = process_coin((coin, days))
+            result_queue.put(('ok', trades))
+        except Exception as e:
+            result_queue.put(('error', str(e)[:50]))
+
     all_trades = []
     completed = 0
     skipped = 0
+    runtime_skip = set()  # Coins that timeout get added here
 
-    args = [(coin, days) for coin in coins]
+    for i, coin in enumerate(coins):
+        # Skip coins that timed out previously
+        if coin in runtime_skip:
+            print(f"    [{i+1}/{len(coins)}] {coin}... SKIP (auto-skip)", flush=True)
+            skipped += 1
+            continue
 
-    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
-        future_to_coin = {executor.submit(process_coin, arg): arg[0] for arg in args}
+        print(f"    [{i+1}/{len(coins)}] {coin}...", end="", flush=True)
 
         try:
-            for future in as_completed(future_to_coin, timeout=TOTAL_TIMEOUT):
-                coin = future_to_coin[future]
-                try:
-                    trades = future.result(timeout=60)
-                    if trades:
-                        all_trades.extend(trades)
+            result_queue = mp.Queue()
+            proc = mp.Process(target=process_coin_worker, args=(coin, days, result_queue))
+            proc.start()
+            proc.join(timeout=COIN_TIMEOUT)
+
+            if proc.is_alive():
+                # Process hung - kill it!
+                proc.terminate()
+                proc.join(timeout=2)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join()
+                print(" TIMEOUT!", flush=True)
+                runtime_skip.add(coin)
+                skipped += 1
+            elif not result_queue.empty():
+                status, data = result_queue.get_nowait()
+                if status == 'ok' and data:
+                    all_trades.extend(data)
                     completed += 1
-                    print(f"    [{completed}/{len(coins)}] {coin} - {len(trades)} trades", flush=True)
-                except Exception as e:
+                    print(f" {len(data)} trades", flush=True)
+                elif status == 'ok':
+                    completed += 1
+                    print(" 0 trades", flush=True)
+                else:
                     skipped += 1
-                    print(f"    [Skip] {coin}: {str(e)[:30]}", flush=True)
+                    print(f" err: {data}", flush=True)
+            else:
+                skipped += 1
+                print(" no result", flush=True)
+
         except Exception as e:
-            print(f"\n  Timeout reached - {len(coins) - completed} coins pending")
-            executor.shutdown(wait=False, cancel_futures=True)
+            skipped += 1
+            print(f" err: {str(e)[:30]}", flush=True)
 
     print(f"\nCompleted: {completed}/{len(coins)} coins")
     print(f"Skipped: {skipped} coins")
+    if runtime_skip:
+        print(f"Auto-skipped (timeout): {', '.join(runtime_skip)}")
     print(f"Total trades: {len(all_trades)}")
 
     if not all_trades:
