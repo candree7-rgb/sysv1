@@ -636,10 +636,17 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
 
     # Get coins
     coins = get_top_n_coins(num_coins)
-    skip = {'USDCUSDT', 'FDUSDUSDT'}  # Stablecoins
-    coins = [c for c in coins if c not in skip]
 
-    print(f"Testing {len(coins)} coins...")
+    # Skip problematic coins (same as live)
+    SKIP_COINS = {
+        'USDCUSDT', 'FDUSDUSDT',  # Stablecoins
+        'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT',  # Often timeout
+        'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT',  # API issues
+        'FOGOUSDT', 'FHEUSDT', 'SKRUSDT',  # New/problematic
+    }
+    coins = [c for c in coins if c not in SKIP_COINS]
+
+    print(f"Testing {len(coins)} coins (skipped {len(SKIP_COINS)} problematic)...")
 
     # Process coins in parallel
     all_trades = []

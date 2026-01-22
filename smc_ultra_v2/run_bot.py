@@ -181,9 +181,10 @@ def run_backtest():
     print("[DEBUG] Imports done", flush=True)
 
     coins = get_top_n_coins(NUM_COINS)
-    # Filter out skipped coins
-    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT', 'FHEUSDT'}
+    # Filter out skipped coins (same as live)
+    SKIP_COINS = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT', 'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT', 'FHEUSDT', 'SKRUSDT'}
     coins = [c for c in coins if c not in SKIP_COINS]
+    print(f"[DEBUG] Filtered to {len(coins)} coins (skipped {len(SKIP_COINS)} problematic)", flush=True)
 
     end = datetime.utcnow()
     start = end - timedelta(days=BACKTEST_DAYS)
