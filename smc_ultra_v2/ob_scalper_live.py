@@ -64,6 +64,30 @@ class LiveSignal:
     ob_strength: float = 0.0
     ob_age_candles: int = 0
 
+    # For scoring/ranking
+    current_price: float = None
+    distance_to_entry_pct: float = None  # How far is current price from entry
+
+    @property
+    def score(self) -> float:
+        """
+        Score for ranking signals. Higher = better opportunity.
+        Factors: OB strength, distance to entry (closer = higher score)
+        """
+        strength_score = self.ob_strength * 50  # 0-50 points
+
+        # Distance score: closer to entry = higher score
+        # 0% distance = 50 points, 2% distance = 0 points
+        if self.distance_to_entry_pct is not None:
+            distance_score = max(0, 50 - (self.distance_to_entry_pct * 25))
+        else:
+            distance_score = 25  # Default middle score
+
+        # Fresher OB = bonus
+        age_penalty = min(self.ob_age_candles * 0.5, 10)  # Max -10 points for old OBs
+
+        return strength_score + distance_score - age_penalty
+
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add EMA indicators - same as backtest"""
@@ -322,6 +346,9 @@ class OBScalperLive:
 
             ob_age_candles = int((ts - ob.timestamp).total_seconds() / 300)
 
+            # Calculate distance to entry for scoring
+            distance_to_entry_pct = abs(current_price - entry) / entry * 100
+
             return LiveSignal(
                 symbol=symbol,
                 direction=direction,
@@ -336,7 +363,9 @@ class OBScalperLive:
                 partial_size=PARTIAL_SIZE,
                 timestamp=ts,
                 ob_strength=ob.strength,
-                ob_age_candles=ob_age_candles
+                ob_age_candles=ob_age_candles,
+                current_price=current_price,
+                distance_to_entry_pct=distance_to_entry_pct,
             )
 
         except Exception as e:

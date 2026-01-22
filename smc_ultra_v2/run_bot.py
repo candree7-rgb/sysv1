@@ -594,7 +594,7 @@ def run_scalper_live():
         pending_orders=len(pending_orders),
     )
 
-    # === ROLLING SCAN: Scan coins continuously, one at a time ===
+    # === BATCH SCAN: Scan all coins, then pick best signals ===
     SCAN_DELAY = 2.5  # seconds between each coin
     coin_index = 0
     last_status_time = time.time()
@@ -602,8 +602,10 @@ def run_scalper_live():
     signals_found = 0
     runtime_skip = set()  # Coins that timeout get added here automatically
     used_obs = set()  # Track OBs that have been traded (filled) - format: "SYMBOL_obtop_obbottom"
+    batch_signals = []  # Collect signals during scan cycle, process at end
 
-    print(f"\n[ROLLING SCAN] {len(coins)} coins × {SCAN_DELAY}s = {len(coins) * SCAN_DELAY / 60:.1f} min cycle", flush=True)
+    print(f"\n[BATCH SCAN] {len(coins)} coins × {SCAN_DELAY}s = {len(coins) * SCAN_DELAY / 60:.1f} min cycle", flush=True)
+    print(f"[BATCH SCAN] Signals ranked by score at end of each cycle", flush=True)
 
     while True:
         try:
@@ -799,34 +801,66 @@ def run_scalper_live():
                 print(f" err", flush=True)
 
             if signal:
-                # Check position limits
+                # Add to batch (basic filtering only - ranking happens at cycle end)
+                ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
+
+                if ob_key in used_obs:
+                    print(f"  [SKIP] {symbol} - OB already traded", flush=True)
+                elif any(o['symbol'] == signal.symbol for o in pending_orders.values()):
+                    print(f"  [SKIP] {symbol} - already pending", flush=True)
+                else:
+                    # Add signal to batch with its ob_key
+                    signal._ob_key = ob_key
+                    batch_signals.append(signal)
+                    print(f"  [BATCH+] Score={signal.score:.1f} Dist={signal.distance_to_entry_pct:.2f}%", flush=True)
+
+            # === END OF CYCLE: Process batch and place orders ===
+            if coin_index == len(coins) - 1 and batch_signals:
+                print(f"\n[BATCH] Cycle complete - {len(batch_signals)} signals collected", flush=True)
+
+                # Get current positions
                 positions = executor.get_all_positions()
+                position_symbols = {p.symbol for p in positions}
                 longs = sum(1 for p in positions if p.side == 'Buy')
                 shorts = sum(1 for p in positions if p.side == 'Sell')
                 pending_l = sum(1 for o in pending_orders.values() if o['direction'] == 'long')
                 pending_s = sum(1 for o in pending_orders.values() if o['direction'] == 'short')
 
-                skip = False
-                ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
+                # Filter out signals for coins we already have positions in
+                batch_signals = [s for s in batch_signals if s.symbol not in position_symbols]
 
-                if signal.direction == 'long' and (longs + pending_l) >= MAX_LONGS:
-                    skip = True
-                if signal.direction == 'short' and (shorts + pending_s) >= MAX_SHORTS:
-                    skip = True
-                if any(o['symbol'] == signal.symbol for o in pending_orders.values()):
-                    skip = True
-                if ob_key in used_obs:
-                    print(f"  [SKIP] {symbol} - OB already traded", flush=True)
-                    skip = True
-                # Also check if we already have a position for this symbol!
-                if any(p.symbol == signal.symbol for p in positions):
-                    print(f"  [SKIP] {symbol} - already in position", flush=True)
-                    skip = True
+                # Separate and sort by score
+                long_signals = sorted([s for s in batch_signals if s.direction == 'long'],
+                                     key=lambda x: x.score, reverse=True)
+                short_signals = sorted([s for s in batch_signals if s.direction == 'short'],
+                                      key=lambda x: x.score, reverse=True)
 
-                if not skip:
+                # Calculate available slots
+                long_slots = max(0, MAX_LONGS - longs - pending_l)
+                short_slots = max(0, MAX_SHORTS - shorts - pending_s)
+
+                # Pick top signals
+                selected_longs = long_signals[:long_slots]
+                selected_shorts = short_signals[:short_slots]
+                selected = selected_longs + selected_shorts
+
+                if selected:
+                    print(f"[BATCH] Selected: {len(selected_longs)}L/{len(selected_shorts)}S (slots: {long_slots}L/{short_slots}S)", flush=True)
+                    for s in selected:
+                        print(f"  → {s.symbol} {s.direction.upper()} Score={s.score:.1f}", flush=True)
+
+                # Clear batch for next cycle
+                batch_signals = []
+
+                # Process selected signals
+                for signal in selected:
+                    now = datetime.utcnow()  # Fresh timestamp for order placement
                     signals_found += 1
-                    print(f"\n★ {symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}", flush=True)
-                    print(f"  SL: {signal.sl_price:.4f} | TP: {signal.tp_price:.4f}", flush=True)
+                    print(f"\n★ {signal.symbol} {signal.direction.upper()} @ {signal.entry_price:.4f}", flush=True)
+                    print(f"  SL: {signal.sl_price:.4f} | TP: {signal.tp_price:.4f} | Score: {signal.score:.1f}", flush=True)
+
+                    ob_key = getattr(signal, '_ob_key', f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}")
+                    used_obs.add(ob_key)  # Mark OB as used immediately
 
                     if PAPER_MODE:
                         sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
@@ -864,7 +898,6 @@ def run_scalper_live():
                             # SAFETY: Set isolated margin first (loss limited to this position only)
                             executor.set_isolated_margin(signal.symbol)
                             executor.set_leverage(signal.symbol, signal.leverage)
-                            ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
                             side = 'Buy' if signal.direction == 'long' else 'Sell'
 
                             # === PARTIAL TP: Split into 2 orders (like backtest) ===
