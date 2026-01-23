@@ -97,6 +97,23 @@ TAKER_FEE = 0.00055  # 0.055%
 # Position limits
 MAX_CONCURRENT = int(os.getenv('MAX_CONCURRENT', '1'))
 
+# Parity Log - for comparing backtest vs live signals
+PARITY_LOG = os.getenv('PARITY_LOG', 'false').lower() == 'true'
+PARITY_LOG_FILE = os.getenv('PARITY_LOG_FILE', 'parity_backtest.log')
+
+
+def log_parity(symbol: str, data: dict):
+    """Log detailed signal check info for parity comparison with live"""
+    if not PARITY_LOG:
+        return
+    import json
+    try:
+        with open(PARITY_LOG_FILE, 'a') as f:
+            data['symbol'] = symbol
+            f.write(json.dumps(data) + '\n')
+    except Exception:
+        pass  # Silent fail in backtest
+
 
 @dataclass
 class ScalpTrade:
@@ -610,6 +627,20 @@ def run_backtest(
             ob_bottom=ob.bottom,
             leverage=leverage
         )
+
+        # Parity log for signal found
+        log_parity(symbol, {
+            'signal': True,
+            'candle_ts': str(ts),
+            '1h_candle_ts': str(h1_candle['timestamp']),
+            'direction': direction,
+            'chosen_ob_ts': str(ob.timestamp),
+            'chosen_ob_strength': ob.strength,
+            'entry': entry,
+            'sl': sl,
+            'tp': tp,
+            'current_price': float(candle['close']),
+        })
 
     return trades
 
