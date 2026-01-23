@@ -295,10 +295,16 @@ class BybitDataDownloader:
         self,
         symbol: str,
         interval: str,
-        days: int
+        days: int,
+        max_candle_age_minutes: int = None
     ) -> Optional[pd.DataFrame]:
         """
         Lädt gecachte Daten falls vorhanden und aktuell.
+
+        Args:
+            max_candle_age_minutes: If set, checks that the latest candle in
+                                   the data is not older than this. Used for
+                                   live trading to ensure fresh data.
 
         Returns:
             DataFrame or None if not cached
@@ -308,13 +314,32 @@ class BybitDataDownloader:
         if not filepath.exists():
             return None
 
-        # Check if cache is recent (< 1 day old)
+        # Check if file is recent (< 1 day old)
         mtime = datetime.fromtimestamp(filepath.stat().st_mtime)
         if datetime.now() - mtime > timedelta(days=1):
             return None  # Cache too old
 
         try:
-            return pd.read_parquet(filepath)
+            df = pd.read_parquet(filepath)
+
+            # For live trading: check if actual candle data is fresh enough
+            if max_candle_age_minutes is not None and len(df) > 0:
+                latest_candle = df['timestamp'].max()
+                # Convert to datetime if needed
+                if hasattr(latest_candle, 'to_pydatetime'):
+                    latest_candle = latest_candle.to_pydatetime()
+                elif isinstance(latest_candle, pd.Timestamp):
+                    latest_candle = latest_candle.to_pydatetime()
+
+                # Make timezone naive for comparison
+                if hasattr(latest_candle, 'tzinfo') and latest_candle.tzinfo is not None:
+                    latest_candle = latest_candle.replace(tzinfo=None)
+
+                candle_age = datetime.utcnow() - latest_candle
+                if candle_age > timedelta(minutes=max_candle_age_minutes):
+                    return None  # Candle data too stale for live trading
+
+            return df
         except Exception as e:
             print(f"Error loading cache for {symbol}: {e}")
             return None
@@ -323,13 +348,18 @@ class BybitDataDownloader:
         self,
         symbol: str,
         interval: str,
-        days: int
+        days: int,
+        max_candle_age_minutes: int = None
     ) -> Optional[pd.DataFrame]:
         """
         Lädt aus Cache oder downloaded falls nötig.
+
+        Args:
+            max_candle_age_minutes: For live trading - ensures cached data
+                                   has candles no older than this.
         """
         # Try cache first
-        df = self.load_cached(symbol, interval, days)
+        df = self.load_cached(symbol, interval, days, max_candle_age_minutes)
         if df is not None:
             return df
 
