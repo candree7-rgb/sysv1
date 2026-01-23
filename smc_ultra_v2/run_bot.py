@@ -596,7 +596,7 @@ def run_scalper_live():
     )
 
     # === BATCH SCAN: Scan all coins, then pick best signals ===
-    SCAN_DELAY = 2.5  # seconds between each coin
+    SCAN_DELAY = float(os.getenv('SCAN_DELAY', '2.5'))  # seconds between each coin
     coin_index = 0
     last_status_time = time.time()
     STATUS_INTERVAL = 60  # Status update every 60 seconds
