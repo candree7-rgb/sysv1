@@ -148,6 +148,8 @@ class BacktestEngine:
         self.active_trades: Dict[str, Trade] = {}
         self.closed_trades: List[BacktestTrade] = []
         self.equity_history: List[Dict] = []
+        self._signal_log_count = 0  # For debug logging
+        self._debug_counts = {}  # For tracking filter reasons
 
     def run(self) -> BacktestResult:
         """
@@ -241,7 +243,11 @@ class BacktestEngine:
 
     def _detect_smc(self):
         """Detect SMC structures for all data"""
-        for symbol, df in self.data.items():
+        # Create list copy to avoid modifying dict during iteration
+        symbols_data = [(s, df) for s, df in self.data.items() if not s.endswith(('_obs', '_fvgs', '_sweeps'))]
+
+        for symbol, df in symbols_data:
+            print(f"  Detecting SMC for {symbol}...", flush=True)
             atr = df['atr']
             self.data[symbol + '_obs'] = self.ob_detector.detect(df, atr)
             self.data[symbol + '_fvgs'] = self.fvg_detector.detect(df)
@@ -261,8 +267,8 @@ class BacktestEngine:
         print(f"  Simulating {total} bars...")
 
         for i, ts in enumerate(timestamps):
-            if i % 5000 == 0:
-                print(f"    Progress: {i}/{total} ({i/total*100:.1f}%)")
+            if i % 500 == 0:
+                print(f"    Progress: {i}/{total} ({i/total*100:.1f}%)", flush=True)
 
             # 1. Update active trades
             self._update_trades(ts)
@@ -278,7 +284,12 @@ class BacktestEngine:
                 'drawdown': self._calc_drawdown()
             })
 
-        print(f"  Completed: {len(self.closed_trades)} trades")
+        print(f"  Completed: {len(self.closed_trades)} trades", flush=True)
+
+        # Debug: show filter reasons
+        print(f"\n  Signal Filter Stats:", flush=True)
+        for reason, count in sorted(self._debug_counts.items(), key=lambda x: -x[1]):
+            print(f"    {reason}: {count:,}", flush=True)
 
     def _update_trades(self, ts: datetime):
         """Update all active trades"""
@@ -330,6 +341,7 @@ class BacktestEngine:
         """Check for new trading signals"""
         best_signal = None
         best_score = 0
+        signals_found = 0
 
         for symbol, df in self.data.items():
             if symbol.endswith(('_obs', '_fvgs', '_sweeps')):
@@ -351,12 +363,20 @@ class BacktestEngine:
             # Analyze
             signal = self._analyze_bar(symbol, df, idx, ts)
 
-            if signal and signal.should_trade and signal.confidence > best_score:
-                best_signal = signal
-                best_score = signal.confidence
+            if signal and signal.should_trade:
+                signals_found += 1
+                if signal.confidence > best_score:
+                    best_signal = signal
+                    best_score = signal.confidence
 
-        if best_signal and best_signal.confidence >= self.bt_config.min_confidence:
-            self._open_trade(best_signal, ts)
+        if best_signal:
+            if best_signal.confidence >= self.bt_config.min_confidence:
+                print(f"  [TRADE] {best_signal.symbol} {best_signal.direction} @ {best_signal.entry_price:.2f} (conf: {best_signal.confidence}%)", flush=True)
+                self._open_trade(best_signal, ts)
+            elif signals_found > 0 and self._signal_log_count < 10:
+                # Log some rejected signals for debugging
+                print(f"  [SKIP] {best_signal.symbol} conf={best_signal.confidence}% < min={self.bt_config.min_confidence}%", flush=True)
+                self._signal_log_count += 1
 
     def _analyze_bar(
         self,
@@ -373,11 +393,16 @@ class BacktestEngine:
         hist = df.iloc[:idx+1].tail(100)
 
         if len(hist) < 50:
+            self._debug_counts['hist_too_short'] = self._debug_counts.get('hist_too_short', 0) + 1
             return None
 
         # Regime check
         regime = self.regime_detector.detect(hist)
+        # Track regime distribution for debugging
+        regime_key = f'regime_{regime.regime.value}'
+        self._debug_counts[regime_key] = self._debug_counts.get(regime_key, 0) + 1
         if not regime.should_trade:
+            self._debug_counts['regime_no_trade'] = self._debug_counts.get('regime_no_trade', 0) + 1
             return None
 
         # Get SMC structures
@@ -401,57 +426,112 @@ class BacktestEngine:
             direction = 'short'
             score += 15
         else:
+            self._debug_counts['no_ema_direction'] = self._debug_counts.get('no_ema_direction', 0) + 1
             return None  # No clear direction
 
-        # OB confluence
+        # ============================================
+        # HIGH VOLATILITY SCALPING STRATEGY
+        # Key: High vol = fast directional moves = quick TP hits
+        # ============================================
+
+        # 0. REQUIRED: HIGH VOLATILITY (ATR above average)
+        # This is the KEY - in high vol, price moves fast and hits TP
+        atr_pct = candle.get('atr_pct', 0)
+        volume_ratio = candle.get('volume_ratio', 1.0)
+
+        # Calculate if volatility is expanding (ATR > recent average)
+        recent_atr = hist['atr_pct'].tail(20).mean() if 'atr_pct' in hist.columns else atr_pct
+        vol_expanding = atr_pct > recent_atr * 1.2  # ATR 20% above average
+
+        if not vol_expanding:
+            self._debug_counts['low_volatility'] = self._debug_counts.get('low_volatility', 0) + 1
+            return None
+
+        score += 25  # High vol bonus
+
+        # 1. REQUIRED: Volume confirmation (smart money active)
+        if volume_ratio < 1.0:  # Below average volume
+            self._debug_counts['low_volume'] = self._debug_counts.get('low_volume', 0) + 1
+            return None
+
+        if volume_ratio > 1.5:
+            score += 15  # High volume bonus
+
+        # 2. REQUIRED: Not in choppy/ranging market
+        if regime.regime.value == 'ranging':
+            self._debug_counts['regime_ranging_skip'] = self._debug_counts.get('regime_ranging_skip', 0) + 1
+            return None
+
+        # 3. BONUS: Trend alignment (not required but adds confidence)
+        if regime.regime.value in ('strong_trend_up', 'strong_trend_down'):
+            score += 20
+        elif regime.regime.value in ('weak_trend_up', 'weak_trend_down'):
+            score += 10
+
+        # 4. BONUS: Liquidity Sweep (SMC confluence)
+        has_sweep = False
+        for sweep in recent_sweeps:
+            if (direction == 'long' and sweep.is_bullish) or \
+               (direction == 'short' and not sweep.is_bullish):
+                has_sweep = True
+                score += 20
+                break
+
+        # 5. BONUS: RSI divergence/extreme
+        rsi = candle.get('rsi', 50)
+        if direction == 'long' and rsi < 40:
+            score += 15
+        elif direction == 'short' and rsi > 60:
+            score += 15
+
+        # 6. BONUS: Near Order Block
         near_ob = False
         for ob in active_obs:
             dist = abs(price - ob.mid) / price * 100
-            if dist < 1.0:  # Within 1%
+            if dist < 2.0:
                 if (direction == 'long' and ob.is_bullish) or \
                    (direction == 'short' and not ob.is_bullish):
                     score += 15
                     near_ob = True
                     break
 
-        # FVG confluence
+        # 7. BONUS: In FVG
+        in_fvg = False
         for fvg in active_fvgs:
             if fvg.bottom <= price <= fvg.top:
                 if (direction == 'long' and fvg.is_bullish) or \
                    (direction == 'short' and not fvg.is_bullish):
                     score += 10
+                    in_fvg = True
                     break
 
-        # Sweep confluence
-        for sweep in recent_sweeps:
-            if (direction == 'long' and sweep.is_bullish) or \
-               (direction == 'short' and not sweep.is_bullish):
-                score += 15
-                break
-
-        # RSI confluence
-        rsi = candle.get('rsi', 50)
-        if direction == 'long' and rsi < 40:
-            score += 5
-        elif direction == 'short' and rsi > 60:
-            score += 5
-
-        # Regime adjustment
+        # Regime confidence multiplier
         score = int(score * regime.leverage_multiplier)
 
+        # Track score distribution
+        if score >= 80:
+            self._debug_counts['score_80+'] = self._debug_counts.get('score_80+', 0) + 1
+        elif score >= 70:
+            self._debug_counts['score_70-79'] = self._debug_counts.get('score_70-79', 0) + 1
+        elif score >= 60:
+            self._debug_counts['score_60-69'] = self._debug_counts.get('score_60-69', 0) + 1
+        else:
+            self._debug_counts['score_below_60'] = self._debug_counts.get('score_below_60', 0) + 1
+
         if score < self.bt_config.min_confidence:
+            self._debug_counts['low_score'] = self._debug_counts.get('low_score', 0) + 1
             return None
 
-        # Calculate targets
+        # Calculate targets - TIGHT for scalping (high vol = fast moves)
         atr = candle['atr']
         if direction == 'long':
             entry = price * (1 + self.bt_config.slippage_pct / 100)
-            sl = entry - atr * 1.0
-            tp = entry + atr * 1.0  # 1:1 RR
+            sl = entry - atr * 0.8   # Tight SL - high vol means fast move
+            tp = entry + atr * 1.0   # 1:1.25 RR - slightly better odds
         else:
             entry = price * (1 - self.bt_config.slippage_pct / 100)
-            sl = entry + atr * 1.0
-            tp = entry - atr * 1.0
+            sl = entry + atr * 0.8   # Tight SL
+            tp = entry - atr * 1.0   # 1:1.25 RR
 
         sl_pct = abs(entry - sl) / entry * 100
         tp_pct = abs(tp - entry) / entry * 100

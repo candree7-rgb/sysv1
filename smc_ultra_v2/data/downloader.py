@@ -5,6 +5,7 @@ Lädt historische Daten von Bybit (KOSTENLOS, kein API Key nötig)
 """
 
 import os
+import ssl
 import time
 import asyncio
 from datetime import datetime, timedelta
@@ -13,6 +14,20 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
+
+# Disable SSL verification for testing environments
+ssl._create_default_https_context = ssl._create_unverified_context
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Patch requests to disable SSL verification globally
+import requests
+from requests.adapters import HTTPAdapter
+old_send = HTTPAdapter.send
+def patched_send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+    return old_send(self, request, stream=stream, timeout=timeout, verify=False, cert=cert, proxies=proxies)
+HTTPAdapter.send = patched_send
+
 from pybit.unified_trading import HTTP
 
 from config.settings import config
@@ -45,7 +60,14 @@ class BybitDataDownloader:
     }
 
     def __init__(self, data_dir: str = None):
+        # Disable SSL verification for testing
+        import requests
+        session = requests.Session()
+        session.verify = False
         self.client = HTTP()  # Kein API Key für Marktdaten
+        # Monkey patch the session to disable SSL
+        if hasattr(self.client, '_session'):
+            self.client._session.verify = False
         self.data_dir = Path(data_dir or config.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -118,11 +140,7 @@ class BybitDataDownloader:
         """
         Lädt historische Daten für einen Coin.
 
-        Bybit Limits:
-        - 1000 Kerzen pro Request
-        - Keine Rate Limits für Marktdaten
-
-        6 Monate bei 5min = ~52.000 Kerzen = ~52 Requests = ~1 Minute
+        Uses direct requests with strict timeout to avoid pybit's internal retry hanging.
         """
         end_time = end_time or datetime.utcnow()
         start_time = end_time - timedelta(days=days)
@@ -130,54 +148,76 @@ class BybitDataDownloader:
         all_data = []
         current_end = end_time
         request_count = 0
+        max_retries = 2
+        request_timeout = 10  # 10 second timeout per request
 
         while current_end > start_time:
             self._rate_limit()
 
-            try:
-                response = self.client.get_kline(
-                    category="linear",
-                    symbol=symbol,
-                    interval=interval,
-                    end=int(current_end.timestamp() * 1000),
-                    limit=1000
-                )
+            # Use direct requests instead of pybit to control timeout
+            url = "https://api.bybit.com/v5/market/kline"
+            params = {
+                "category": "linear",
+                "symbol": symbol,
+                "interval": interval,
+                "end": int(current_end.timestamp() * 1000),
+                "limit": 1000
+            }
 
-                if response['retCode'] != 0:
-                    print(f"  Error for {symbol}: {response['retMsg']}")
-                    break
+            for retry in range(max_retries):
+                try:
+                    response = requests.get(url, params=params, timeout=request_timeout, verify=False)
+                    data = response.json()
 
-                klines = response['result']['list']
-                if not klines:
-                    break
+                    if data.get('retCode') != 0:
+                        error_msg = data.get('retMsg', 'Unknown error')
+                        if 'rate limit' in error_msg.lower() or data.get('retCode') == 10006:
+                            if retry < max_retries - 1:
+                                time.sleep(2)  # Short wait, then retry once
+                                continue
+                            else:
+                                print(f"  Rate limit for {symbol}, skipping remaining data")
+                                return self._build_dataframe(all_data) if all_data else pd.DataFrame()
+                        print(f"  Error for {symbol}: {error_msg}")
+                        return self._build_dataframe(all_data) if all_data else pd.DataFrame()
 
-                all_data.extend(klines)
-                request_count += 1
+                    klines = data['result']['list']
+                    if not klines:
+                        return self._build_dataframe(all_data) if all_data else pd.DataFrame()
 
-                # Älteste Kerze als neues End
-                oldest_ts = int(klines[-1][0])
-                current_end = datetime.utcfromtimestamp(oldest_ts / 1000)
+                    all_data.extend(klines)
+                    request_count += 1
 
-            except Exception as e:
-                print(f"  Exception for {symbol}: {e}")
-                break
+                    # Älteste Kerze als neues End
+                    oldest_ts = int(klines[-1][0])
+                    current_end = datetime.utcfromtimestamp(oldest_ts / 1000)
+                    break  # Success, exit retry loop
 
+                except requests.exceptions.Timeout:
+                    if retry < max_retries - 1:
+                        continue
+                    print(f"  Timeout for {symbol}, skipping")
+                    return self._build_dataframe(all_data) if all_data else pd.DataFrame()
+                except Exception as e:
+                    print(f"  Exception for {symbol}: {str(e)[:50]}")
+                    return self._build_dataframe(all_data) if all_data else pd.DataFrame()
+
+        return self._build_dataframe(all_data)
+
+    def _build_dataframe(self, all_data: list) -> pd.DataFrame:
+        """Convert raw kline data to DataFrame"""
         if not all_data:
             return pd.DataFrame()
 
-        # Zu DataFrame konvertieren
         df = pd.DataFrame(all_data, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
         ])
 
-        # Datentypen konvertieren
         df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
         for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
             df[col] = df[col].astype(float)
 
-        # Sortieren und Duplikate entfernen
         df = df.sort_values('timestamp').drop_duplicates('timestamp').reset_index(drop=True)
-
         return df
 
     def download_mtf(

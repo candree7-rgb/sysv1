@@ -213,15 +213,25 @@ class BybitWebSocket:
 
             data = message['data']
 
+            # Helper to safely convert to float (handles empty strings)
+            def safe_float(val, default=0.0):
+                if val is None or val == '':
+                    return default
+                return float(val)
+
             ticker = Ticker(
                 symbol=data.get('symbol', ''),
-                last_price=float(data.get('lastPrice', 0)),
-                bid=float(data.get('bid1Price', 0)),
-                ask=float(data.get('ask1Price', 0)),
-                volume_24h=float(data.get('turnover24h', 0)),
-                change_24h=float(data.get('price24hPcnt', 0)) * 100,
+                last_price=safe_float(data.get('lastPrice')),
+                bid=safe_float(data.get('bid1Price')),
+                ask=safe_float(data.get('ask1Price')),
+                volume_24h=safe_float(data.get('turnover24h')),
+                change_24h=safe_float(data.get('price24hPcnt')) * 100,
                 timestamp=datetime.utcnow()
             )
+
+            # Skip if no valid price
+            if ticker.last_price <= 0:
+                return
 
             for callback in self.callbacks['ticker']:
                 callback(ticker)
