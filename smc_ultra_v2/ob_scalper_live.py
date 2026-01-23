@@ -233,13 +233,13 @@ class OBScalperLive:
                 return df  # Return cached
 
         # For LIVE trading: ensure file cache also has fresh candles
-        # Max candle age = 3x the interval (e.g., 5m -> max 15 min old candles)
+        # Max candle age = interval + small buffer (for 100% backtest parity)
         max_candle_age = {
-            '1': 5,        # 1m: max 5 min old
-            '5': 15,       # 5m: max 15 min old
-            '60': 120,     # 1H: max 2 hours old
-            '240': 480,    # 4H: max 8 hours old
-            'D': 1440 * 2  # Daily: max 2 days old
+            '1': 3,        # 1m: max 3 min old
+            '5': 10,       # 5m: max 10 min old (1 candle behind max)
+            '60': 90,      # 1H: max 90 min old
+            '240': 300,    # 4H: max 5 hours old
+            'D': 1500      # Daily: max ~25 hours old
         }
 
         # Download fresh (with candle age check for file cache)
