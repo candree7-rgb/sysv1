@@ -517,8 +517,10 @@ def run_backtest(
                 continue  # RSI too low - not a pullback, skip
 
         # === FIND VALID OB ===
+        # Pick the FRESHEST matching OB (same logic as live!)
         current_price = candle['close']
         matching_ob = None
+        best_ob_age = float('inf')
 
         for ob in obs:
             # CRITICAL: Only use OBs we KNOW about (detection_timestamp check)
@@ -562,16 +564,19 @@ def run_backtest(
                 continue
 
             # Check if price is touching OB zone on THIS 1min candle
+            # Pick the FRESHEST OB if multiple match (same as live!)
             if direction == 'long':
                 # For long: price should touch OB top (entry level)
                 if candle['low'] <= ob.top <= candle['high']:
-                    matching_ob = ob
-                    break
+                    if ob_age < best_ob_age:
+                        matching_ob = ob
+                        best_ob_age = ob_age
             else:
                 # For short: price should touch OB bottom (entry level)
                 if candle['low'] <= ob.bottom <= candle['high']:
-                    matching_ob = ob
-                    break
+                    if ob_age < best_ob_age:
+                        matching_ob = ob
+                        best_ob_age = ob_age
 
         if not matching_ob:
             continue

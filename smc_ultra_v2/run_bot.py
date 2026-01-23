@@ -631,6 +631,10 @@ def run_scalper_live():
                         if (now - info['placed_at']).total_seconds() / 60 > MAX_ORDER_AGE_MIN:
                             print(f"  [EXPIRE] {info['symbol']}", flush=True)
                             executor.cancel_order(info['symbol'], order_id)
+                            # Release OB for reuse (was marked used at signal selection)
+                            if 'ob_key' in info:
+                                used_obs.discard(info['ob_key'])
+                                print(f"  [RELEASE] OB freed for {info['symbol']}", flush=True)
                             del pending_orders[order_id]
 
                     # Check filled
