@@ -19,6 +19,9 @@ from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
 
+# === DEBUG MODE (set DEBUG_SIGNALS=true in Railway to see filtering reasons) ===
+DEBUG_SIGNALS = os.getenv('DEBUG_SIGNALS', 'false').lower() == 'true'
+
 # === CONFIGURATION (MATCHED to ob_scalper.py backtest!) ===
 OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.8'))  # Same as backtest!
 OB_MIN_STRENGTH_SHORT = float(os.getenv('OB_MIN_STRENGTH_SHORT', '0.9'))  # Same as backtest!
@@ -205,7 +208,10 @@ class OBScalperLive:
             self._data_cache[cache_key] = (df, now)
         return df
 
-    def get_signal(self, symbol: str, debug: bool = False) -> Optional[LiveSignal]:
+    def get_signal(self, symbol: str, debug: bool = None) -> Optional[LiveSignal]:
+        # Use ENV variable if debug not explicitly set
+        if debug is None:
+            debug = DEBUG_SIGNALS
         """
         Check if there's a valid OB setup for a symbol.
 
@@ -423,16 +429,43 @@ class OBScalperLive:
             print(f"Error checking {symbol}: {e}")
             return None
 
-    def scan_coins(self, coins: List[str], timeout_per_coin: int = 30, debug: bool = False) -> List[LiveSignal]:
+    def scan_coins(self, coins: List[str], timeout_per_coin: int = 30, debug: bool = None) -> List[LiveSignal]:
         """Scan multiple coins for signals with per-coin timeout"""
         import time
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        # Use ENV variable if debug not explicitly set
+        if debug is None:
+            debug = DEBUG_SIGNALS
 
         signals = []
         skipped = 0
         slow_coins = []
         total = len(coins)
         scan_start = time.time()
+
+        # Filter stats (for debug summary)
+        filter_stats = {
+            'no_data': 0,
+            'no_obs': 0,
+            'no_1h_trend': 0,
+            '4h_mismatch': 0,
+            'daily_mismatch': 0,
+            'no_valid_ob': 0,
+            'signal': 0,
+            'error': 0
+        }
+
+        if debug:
+            print(f"\n{'='*60}", flush=True)
+            print(f"DEBUG MODE - Settings:", flush=True)
+            print(f"  OB_MIN_STRENGTH: {OB_MIN_STRENGTH} (short: {OB_MIN_STRENGTH_SHORT})", flush=True)
+            print(f"  OB_MAX_AGE: {OB_MAX_AGE} candles ({OB_MAX_AGE * 5}min)", flush=True)
+            print(f"  USE_VOLUME_FILTER: {USE_VOLUME_FILTER} (min: {MIN_VOLUME_RATIO}x)", flush=True)
+            print(f"  USE_4H_MTF: {USE_4H_MTF}", flush=True)
+            print(f"  USE_DAILY_FOR_SHORTS: {USE_DAILY_FOR_SHORTS}", flush=True)
+            print(f"  USE_DAILY_FOR_LONGS: {USE_DAILY_FOR_LONGS}", flush=True)
+            print(f"{'='*60}\n", flush=True)
 
         print(f"    Scanning {total} coins... (debug={debug})", flush=True)
 
@@ -476,6 +509,15 @@ class OBScalperLive:
 
         total_time = time.time() - scan_start
         print(f"    Done: {len(signals)} signals in {total_time:.1f}s ({skipped} skipped)", flush=True)
+
+        if debug and len(signals) == 0:
+            print(f"\n    ⚠️  NO SIGNALS FOUND - Check Railway logs above for per-coin reasons", flush=True)
+            print(f"    Common causes:", flush=True)
+            print(f"    - 1H trend unclear (close not > ema20 > ema50 for bullish)", flush=True)
+            print(f"    - 4H doesn't confirm 1H direction", flush=True)
+            print(f"    - Daily not bearish for shorts", flush=True)
+            print(f"    - No OBs with strength >= {OB_MIN_STRENGTH}", flush=True)
+            print(f"    - All OBs older than {OB_MAX_AGE} candles ({OB_MAX_AGE * 5}min)", flush=True)
 
         return signals
 
