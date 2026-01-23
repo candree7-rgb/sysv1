@@ -294,6 +294,7 @@ def run_backtest(
     """
     trades = []
     active_trade = None
+    used_obs = set()  # Track OBs that have been traded (same as live!)
 
     # Create timestamp index for fast lookup
     df_5m_indexed = df_5m.set_index('timestamp')
@@ -547,6 +548,11 @@ def run_backtest(
                 if ob.mitigation_timestamp and ob.mitigation_timestamp <= ts:
                     continue  # Already mitigated
 
+            # Skip OBs that have already been traded (same as live!)
+            ob_key = f"{symbol}_{ob.top}_{ob.bottom}"
+            if ob_key in used_obs:
+                continue  # Already traded this OB
+
             # Filter by strength (stricter for shorts)
             min_strength = OB_MIN_STRENGTH_SHORT if direction == 'short' else OB_MIN_STRENGTH
             if ob.strength < min_strength:
@@ -624,6 +630,10 @@ def run_backtest(
             ob_bottom=ob.bottom,
             leverage=leverage
         )
+
+        # Mark OB as used (same as live - prevents re-entry on same OB)
+        ob_key = f"{symbol}_{ob.top}_{ob.bottom}"
+        used_obs.add(ob_key)
 
         # Parity log for signal found
         log_parity(symbol, {
