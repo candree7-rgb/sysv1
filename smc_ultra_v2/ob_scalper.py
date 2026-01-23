@@ -707,7 +707,7 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
 
     # Process coins with per-coin timeout (same as live)
     import multiprocessing as mp
-    COIN_TIMEOUT = 60  # seconds per coin
+    COIN_TIMEOUT = int(os.getenv('COIN_TIMEOUT', '60'))  # seconds per coin (ENV configurable)
 
     def process_coin_worker(coin, days, result_queue):
         """Worker that runs in subprocess - can be killed on timeout"""

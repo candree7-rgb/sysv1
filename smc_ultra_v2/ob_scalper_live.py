@@ -232,8 +232,21 @@ class OBScalperLive:
             if now - cached_at < cache_duration:
                 return df  # Return cached
 
-        # Download fresh
-        df = self.dl.load_or_download(symbol, interval, days)
+        # For LIVE trading: ensure file cache also has fresh candles
+        # Max candle age = interval + small buffer (for 100% backtest parity)
+        max_candle_age = {
+            '1': 3,        # 1m: max 3 min old
+            '5': 10,       # 5m: max 10 min old (1 candle behind max)
+            '60': 90,      # 1H: max 90 min old
+            '240': 300,    # 4H: max 5 hours old
+            'D': 1500      # Daily: max ~25 hours old
+        }
+
+        # Download fresh (with candle age check for file cache)
+        df = self.dl.load_or_download(
+            symbol, interval, days,
+            max_candle_age_minutes=max_candle_age.get(interval, 60)
+        )
         if df is not None and len(df) > 0:
             self._data_cache[cache_key] = (df, now)
         return df
