@@ -22,6 +22,10 @@ import numpy as np
 # === DEBUG MODE (set DEBUG_SIGNALS=true in Railway to see filtering reasons) ===
 DEBUG_SIGNALS = os.getenv('DEBUG_SIGNALS', 'false').lower() == 'true'
 
+# === PARITY LOG (set PARITY_LOG=true to log detailed info for backtest comparison) ===
+PARITY_LOG = os.getenv('PARITY_LOG', 'false').lower() == 'true'
+PARITY_LOG_FILE = os.getenv('PARITY_LOG_FILE', 'parity_live.log')
+
 # === CONFIGURATION (MATCHED to ob_scalper.py backtest!) ===
 OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.8'))  # Same as backtest!
 OB_MIN_STRENGTH_SHORT = float(os.getenv('OB_MIN_STRENGTH_SHORT', '0.9'))  # Same as backtest!
@@ -102,6 +106,21 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     return df
+
+
+def log_parity(symbol: str, data: dict):
+    """Log detailed signal check info for parity comparison with backtest"""
+    if not PARITY_LOG:
+        return
+
+    import json
+    try:
+        with open(PARITY_LOG_FILE, 'a') as f:
+            data['symbol'] = symbol
+            data['log_time'] = datetime.utcnow().isoformat()
+            f.write(json.dumps(data) + '\n')
+    except Exception as e:
+        print(f"  [PARITY] Log error: {e}", flush=True)
 
 
 class OBScalperLive:
@@ -285,6 +304,18 @@ class OBScalperLive:
 
             if not h1_bullish and not h1_bearish:
                 if debug: print(f"      {symbol}: SKIP - No clear 1H trend (neither bullish nor bearish)")
+                log_parity(symbol, {
+                    'signal': False,
+                    'skip_reason': 'no_1h_trend',
+                    'check_time': now.isoformat(),
+                    '5m_candle_ts': str(ts),
+                    '1h_candle_ts': str(h1_candle['timestamp']),
+                    '1h_close': float(h1_candle['close']),
+                    '1h_ema20': float(h1_candle['ema20']),
+                    '1h_ema50': float(h1_candle['ema50']),
+                    '1h_bullish': h1_bullish,
+                    '1h_bearish': h1_bearish,
+                })
                 return None  # No clear 1H trend
 
             # === 4H MTF CHECK ===
@@ -305,9 +336,25 @@ class OBScalperLive:
                 # 4H must confirm 1H
                 if h1_bullish and not h4_bullish:
                     if debug: print(f"      {symbol}: SKIP - 1H bullish but 4H NOT bullish")
+                    log_parity(symbol, {
+                        'signal': False,
+                        'skip_reason': '4h_mismatch',
+                        'check_time': now.isoformat(),
+                        '1h_bullish': True,
+                        '4h_bullish': h4_bullish,
+                        '4h_bearish': h4_bearish,
+                    })
                     return None
                 if h1_bearish and not h4_bearish:
                     if debug: print(f"      {symbol}: SKIP - 1H bearish but 4H NOT bearish")
+                    log_parity(symbol, {
+                        'signal': False,
+                        'skip_reason': '4h_mismatch',
+                        'check_time': now.isoformat(),
+                        '1h_bearish': True,
+                        '4h_bullish': h4_bullish,
+                        '4h_bearish': h4_bearish,
+                    })
                     return None
 
             # Direction
@@ -328,6 +375,13 @@ class OBScalperLive:
                     print(f"      {symbol}: Daily bearish={daily_bearish}")
                 if not daily_bearish:
                     if debug: print(f"      {symbol}: SKIP - Short but Daily NOT bearish")
+                    log_parity(symbol, {
+                        'signal': False,
+                        'skip_reason': 'daily_not_bearish',
+                        'check_time': now.isoformat(),
+                        'direction': 'short',
+                        'daily_bearish': daily_bearish,
+                    })
                     return None  # Daily not bearish - skip short
 
             # === DAILY FILTER FOR LONGS (disabled by default) ===
@@ -396,6 +450,23 @@ class OBScalperLive:
 
             if not best_ob:
                 if debug: print(f"      {symbol}: SKIP - No valid OB after filtering")
+                # Parity log for no signal
+                log_parity(symbol, {
+                    'signal': False,
+                    'skip_reason': 'no_valid_ob',
+                    'check_time': now.isoformat(),
+                    '5m_candle_ts': str(ts),
+                    '1h_candle_ts': str(h1_candle['timestamp']),
+                    '1h_bullish': h1_bullish,
+                    '1h_bearish': h1_bearish,
+                    'direction': direction,
+                    'obs_total': len(obs),
+                    'obs_mitigated': ob_mitigated,
+                    'obs_weak': ob_weak,
+                    'obs_low_vol': ob_low_vol,
+                    'obs_old': ob_old,
+                    'obs_wrong_dir': ob_wrong_dir,
+                })
                 return None
 
             matching_ob = best_ob
@@ -430,6 +501,27 @@ class OBScalperLive:
 
             # Calculate distance to entry for scoring
             distance_to_entry_pct = abs(current_price - entry) / entry * 100
+
+            # Parity log for signal found
+            log_parity(symbol, {
+                'signal': True,
+                'check_time': now.isoformat(),
+                '5m_candle_ts': str(ts),
+                '1h_candle_ts': str(h1_candle['timestamp']),
+                '1h_bullish': h1_bullish,
+                '1h_bearish': h1_bearish,
+                'direction': direction,
+                'obs_total': len(obs),
+                'obs_valid': 1,
+                'chosen_ob_ts': str(ob.timestamp),
+                'chosen_ob_strength': ob.strength,
+                'chosen_ob_age': ob_age_candles,
+                'entry': entry,
+                'sl': sl,
+                'tp': tp,
+                'current_price': current_price,
+                'distance_to_entry_pct': distance_to_entry_pct,
+            })
 
             return LiveSignal(
                 symbol=symbol,
