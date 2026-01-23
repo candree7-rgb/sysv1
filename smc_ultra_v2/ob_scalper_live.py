@@ -114,13 +114,11 @@ def log_parity(symbol: str, data: dict):
         return
 
     import json
-    try:
-        with open(PARITY_LOG_FILE, 'a') as f:
-            data['symbol'] = symbol
-            data['log_time'] = datetime.utcnow().isoformat()
-            f.write(json.dumps(data) + '\n')
-    except Exception as e:
-        print(f"  [PARITY] Log error: {e}", flush=True)
+    data['symbol'] = symbol
+    data['log_time'] = datetime.utcnow().isoformat()
+
+    # Print to console (visible in Railway logs)
+    print(f"[PARITY] {json.dumps(data)}", flush=True)
 
 
 class OBScalperLive:
