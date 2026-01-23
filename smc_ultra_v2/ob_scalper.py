@@ -33,6 +33,10 @@ OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '100'))  # in 5min candles
 RR_TARGET = float(os.getenv('RR_TARGET', '2.0'))  # TP = RR_TARGET * SL
 SL_BUFFER_PCT = float(os.getenv('SL_BUFFER_PCT', '0.05'))  # Buffer beyond OB edge
 
+# ORDER EXPIRY - same as live! If price doesn't touch OB within X minutes, skip
+# This simulates limit order cancellation in live trading
+MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # 30 min like live
+
 # Volume Filter - OB must have above-average volume (confirms institutional interest)
 MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
 USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
@@ -542,6 +546,15 @@ def run_backtest(
             if ob_age > OB_MAX_AGE:
                 continue
 
+            # === ORDER EXPIRY (same as live!) ===
+            # In live, we place a limit order when signal is detected.
+            # If price doesn't reach OB within MAX_ORDER_AGE_MIN, order is cancelled.
+            # Simulate this by checking time since detection.
+            ob_known_at = ob.detection_timestamp if ob.detection_timestamp else ob.timestamp
+            time_since_detection_min = (ts - ob_known_at).total_seconds() / 60
+            if time_since_detection_min > MAX_ORDER_AGE_MIN:
+                continue  # Order would have expired in live!
+
             # Check direction matches
             if direction == 'long' and not ob.is_bullish:
                 continue
@@ -630,6 +643,7 @@ def run_ob_scalper(num_coins: int = 50, days: int = 30):
     if MAX_LEVERAGE < 20:
         dd_opts.append(f"MaxLev={MAX_LEVERAGE}")
     print(f"DD Reduction: {', '.join(dd_opts) if dd_opts else 'None'}")
+    print(f"Order Expiry: {MAX_ORDER_AGE_MIN} min (same as live)")
 
     print(f"Workers: {NUM_WORKERS} | Timeout: {TOTAL_TIMEOUT}s")
     print("=" * 80)
