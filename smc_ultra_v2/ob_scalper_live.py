@@ -19,12 +19,16 @@ from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
 
-# === CONFIGURATION (same as ob_scalper.py) ===
-OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.9'))
-OB_MIN_STRENGTH_SHORT = float(os.getenv('OB_MIN_STRENGTH_SHORT', '0.9'))
-OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '50'))  # in 5min candles
-RR_TARGET = float(os.getenv('RR_TARGET', '1.5'))
+# === CONFIGURATION (MATCHED to ob_scalper.py backtest!) ===
+OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.8'))  # Same as backtest!
+OB_MIN_STRENGTH_SHORT = float(os.getenv('OB_MIN_STRENGTH_SHORT', '0.9'))  # Same as backtest!
+OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '100'))  # Same as backtest (was 50)
+RR_TARGET = float(os.getenv('RR_TARGET', '2.0'))  # Same as backtest (was 1.5)
 SL_BUFFER_PCT = float(os.getenv('SL_BUFFER_PCT', '0.05'))
+
+# Volume Filter - SAME AS BACKTEST (confirms institutional interest)
+MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
+USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
 
 # MTF Filters
 USE_4H_MTF = os.getenv('USE_4H_MTF', 'true').lower() == 'true'
@@ -141,7 +145,7 @@ class OBScalperLive:
             self._get_cached(symbol, "60", 3)   # 1H: 3 days
             if USE_4H_MTF:
                 self._get_cached(symbol, "240", 7)   # 4H: 7 days
-            if USE_DAILY_FOR_SHORTS:
+            if USE_DAILY_FOR_SHORTS or USE_DAILY_FOR_LONGS:
                 self._get_cached(symbol, "D", 14)    # Daily: 14 days
             return True
 
@@ -214,13 +218,13 @@ class OBScalperLive:
             df_5m = self._get_cached(symbol, "5", 1)      # 5m for OB detection
             df_1h = self._get_cached(symbol, "60", 7)     # 1H for MTF
             df_4h = self._get_cached(symbol, "240", 14) if USE_4H_MTF else None
-            df_daily = self._get_cached(symbol, "D", 30) if USE_DAILY_FOR_SHORTS else None
+            df_daily = self._get_cached(symbol, "D", 30) if (USE_DAILY_FOR_SHORTS or USE_DAILY_FOR_LONGS) else None
 
             if df_5m is None or len(df_5m) < 50:
-                if debug: print(f"      {symbol}: No 5m data")
+                if debug: print(f"      {symbol}: SKIP - No 5m data")
                 return None
             if df_1h is None or len(df_1h) < 20:
-                if debug: print(f"      {symbol}: No 1h data")
+                if debug: print(f"      {symbol}: SKIP - No 1h data")
                 return None
 
             # Add indicators
@@ -231,6 +235,11 @@ class OBScalperLive:
             if df_daily is not None:
                 df_daily = calculate_indicators(df_daily)
 
+            # Add volume SMA for OB volume filter (SAME AS BACKTEST!)
+            if 'volume' in df_5m.columns:
+                df_5m['volume_sma'] = df_5m['volume'].rolling(20).mean()
+                df_5m['volume_ratio'] = df_5m['volume'] / df_5m['volume_sma']
+
             # Detect OBs on 5min
             atr = df_5m['close'].rolling(14).apply(
                 lambda x: pd.Series(x).diff().abs().mean() if len(x) > 1 else 0
@@ -238,7 +247,10 @@ class OBScalperLive:
             obs = self.ob_detector.detect(df_5m, atr)
 
             if not obs:
+                if debug: print(f"      {symbol}: SKIP - No OBs detected")
                 return None
+
+            if debug: print(f"      {symbol}: Found {len(obs)} OBs")
 
             # Get current 5m candle (no 1m needed!)
             current_5m = df_5m.iloc[-1]
@@ -251,7 +263,12 @@ class OBScalperLive:
             h1_bullish = h1_candle['close'] > h1_candle['ema20'] > h1_candle['ema50']
             h1_bearish = h1_candle['close'] < h1_candle['ema20'] < h1_candle['ema50']
 
+            if debug:
+                print(f"      {symbol}: 1H close={h1_candle['close']:.4f} ema20={h1_candle['ema20']:.4f} ema50={h1_candle['ema50']:.4f}")
+                print(f"      {symbol}: 1H bullish={h1_bullish} bearish={h1_bearish}")
+
             if not h1_bullish and not h1_bearish:
+                if debug: print(f"      {symbol}: SKIP - No clear 1H trend (neither bullish nor bearish)")
                 return None  # No clear 1H trend
 
             # === 4H MTF CHECK ===
@@ -260,20 +277,31 @@ class OBScalperLive:
                 h4_bullish = h4_candle['close'] > h4_candle['ema20'] > h4_candle['ema50']
                 h4_bearish = h4_candle['close'] < h4_candle['ema20'] < h4_candle['ema50']
 
+                if debug:
+                    print(f"      {symbol}: 4H close={h4_candle['close']:.4f} ema20={h4_candle['ema20']:.4f} ema50={h4_candle['ema50']:.4f}")
+                    print(f"      {symbol}: 4H bullish={h4_bullish} bearish={h4_bearish}")
+
                 # 4H must confirm 1H
                 if h1_bullish and not h4_bullish:
+                    if debug: print(f"      {symbol}: SKIP - 1H bullish but 4H NOT bullish")
                     return None
                 if h1_bearish and not h4_bearish:
+                    if debug: print(f"      {symbol}: SKIP - 1H bearish but 4H NOT bearish")
                     return None
 
             # Direction
             direction = 'long' if h1_bullish else 'short'
+            if debug: print(f"      {symbol}: Direction = {direction}")
 
             # === DAILY FILTER FOR SHORTS ONLY ===
             if USE_DAILY_FOR_SHORTS and direction == 'short' and df_daily is not None and len(df_daily) > 1:
                 daily_candle = df_daily.iloc[-2]  # Use completed daily candle
                 daily_bearish = daily_candle['close'] < daily_candle['ema20'] < daily_candle['ema50']
+                if debug:
+                    print(f"      {symbol}: Daily close={daily_candle['close']:.4f} ema20={daily_candle['ema20']:.4f} ema50={daily_candle['ema50']:.4f}")
+                    print(f"      {symbol}: Daily bearish={daily_bearish}")
                 if not daily_bearish:
+                    if debug: print(f"      {symbol}: SKIP - Short but Daily NOT bearish")
                     return None  # Daily not bearish - skip short
 
             # === DAILY FILTER FOR LONGS (disabled by default) ===
@@ -281,31 +309,50 @@ class OBScalperLive:
                 daily_candle = df_daily.iloc[-2]  # Use completed daily candle
                 daily_bullish = daily_candle['close'] > daily_candle['ema20'] > daily_candle['ema50']
                 if not daily_bullish:
+                    if debug: print(f"      {symbol}: SKIP - Long but Daily NOT bullish")
                     return None  # Daily not bullish - skip long
 
             # === FIND VALID OB (no price touch check - just find best OB!) ===
             best_ob = None
             best_ob_age = float('inf')
 
+            # Debug counters
+            ob_mitigated = 0
+            ob_weak = 0
+            ob_old = 0
+            ob_wrong_dir = 0
+            ob_low_vol = 0
+
             for ob in obs:
                 # Not mitigated
                 if ob.is_mitigated:
+                    ob_mitigated += 1
                     continue
 
                 # Strength filter
                 min_strength = OB_MIN_STRENGTH_SHORT if direction == 'short' else OB_MIN_STRENGTH
                 if ob.strength < min_strength:
+                    ob_weak += 1
                     continue
+
+                # Volume filter (SAME AS BACKTEST - confirms institutional interest)
+                if USE_VOLUME_FILTER:
+                    if hasattr(ob, 'volume_ratio') and ob.volume_ratio < MIN_VOLUME_RATIO:
+                        ob_low_vol += 1
+                        continue  # Low volume OB - skip
 
                 # Age filter (in 5min candles)
                 ob_age = (ts - ob.timestamp).total_seconds() / 300
                 if ob_age > OB_MAX_AGE or ob_age < 0:
+                    ob_old += 1
                     continue
 
                 # Direction match
                 if direction == 'long' and not ob.is_bullish:
+                    ob_wrong_dir += 1
                     continue
                 if direction == 'short' and ob.is_bullish:
+                    ob_wrong_dir += 1
                     continue
 
                 # Pick the FRESHEST valid OB (lowest age)
@@ -313,7 +360,11 @@ class OBScalperLive:
                     best_ob = ob
                     best_ob_age = ob_age
 
+            if debug:
+                print(f"      {symbol}: OB filter: {len(obs)} total, {ob_mitigated} mitigated, {ob_weak} weak, {ob_low_vol} low_vol, {ob_old} old, {ob_wrong_dir} wrong_dir")
+
             if not best_ob:
+                if debug: print(f"      {symbol}: SKIP - No valid OB after filtering")
                 return None
 
             matching_ob = best_ob
@@ -372,7 +423,7 @@ class OBScalperLive:
             print(f"Error checking {symbol}: {e}")
             return None
 
-    def scan_coins(self, coins: List[str], timeout_per_coin: int = 30) -> List[LiveSignal]:
+    def scan_coins(self, coins: List[str], timeout_per_coin: int = 30, debug: bool = False) -> List[LiveSignal]:
         """Scan multiple coins for signals with per-coin timeout"""
         import time
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
@@ -383,11 +434,11 @@ class OBScalperLive:
         total = len(coins)
         scan_start = time.time()
 
-        print(f"    Scanning {total} coins...", flush=True)
+        print(f"    Scanning {total} coins... (debug={debug})", flush=True)
 
         for i, symbol in enumerate(coins):
-            # Progress every 10 coins
-            if i > 0 and i % 10 == 0:
+            # Progress every 10 coins (unless debug mode)
+            if not debug and i > 0 and i % 10 == 0:
                 elapsed = time.time() - scan_start
                 rate = i / elapsed if elapsed > 0 else 0
                 eta = (total - i) / rate if rate > 0 else 0
@@ -398,7 +449,7 @@ class OBScalperLive:
             try:
                 # Use thread with timeout to prevent hanging
                 with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(self.get_signal, symbol)
+                    future = executor.submit(self.get_signal, symbol, debug)
                     signal = future.result(timeout=timeout_per_coin)
 
                 coin_time = time.time() - coin_start
@@ -427,6 +478,38 @@ class OBScalperLive:
         print(f"    Done: {len(signals)} signals in {total_time:.1f}s ({skipped} skipped)", flush=True)
 
         return signals
+
+    def debug_scan(self, coins: List[str], max_coins: int = 10) -> Dict:
+        """
+        Debug scan that shows exactly why coins are filtered out.
+        Returns detailed stats.
+        """
+        print(f"\n{'='*60}")
+        print(f"DEBUG SCAN - Analyzing first {max_coins} coins")
+        print(f"{'='*60}")
+        print(f"Settings:")
+        print(f"  OB_MIN_STRENGTH: {OB_MIN_STRENGTH}")
+        print(f"  OB_MAX_AGE: {OB_MAX_AGE} candles")
+        print(f"  USE_4H_MTF: {USE_4H_MTF}")
+        print(f"  USE_DAILY_FOR_SHORTS: {USE_DAILY_FOR_SHORTS}")
+        print(f"  USE_DAILY_FOR_LONGS: {USE_DAILY_FOR_LONGS}")
+        print(f"{'='*60}\n")
+
+        signals = []
+        for symbol in coins[:max_coins]:
+            print(f"\n--- {symbol} ---")
+            signal = self.get_signal(symbol, debug=True)
+            if signal:
+                signals.append(signal)
+                print(f"  ✓ SIGNAL: {signal.direction.upper()} @ {signal.entry_price:.4f}")
+            else:
+                print(f"  ✗ No signal")
+
+        print(f"\n{'='*60}")
+        print(f"RESULT: {len(signals)}/{max_coins} coins have signals")
+        print(f"{'='*60}\n")
+
+        return {"signals": signals, "total": max_coins, "found": len(signals)}
 
 
 def print_signal(signal: LiveSignal):
