@@ -114,11 +114,24 @@ def log_parity(symbol: str, data: dict):
         return
 
     import json
+    import numpy as np
+
+    # Convert numpy types to Python types for JSON
+    def convert(obj):
+        if isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        if isinstance(obj, (np.integer, int)):
+            return int(obj)
+        if isinstance(obj, (np.floating, float)):
+            return float(obj)
+        return str(obj)
+
     data['symbol'] = symbol
     data['log_time'] = datetime.utcnow().isoformat()
+    clean_data = {k: convert(v) for k, v in data.items()}
 
     # Print to console (visible in Railway logs)
-    print(f"[PARITY] {json.dumps(data)}", flush=True)
+    print(f"[PARITY] {json.dumps(clean_data)}", flush=True)
 
 
 class OBScalperLive:
