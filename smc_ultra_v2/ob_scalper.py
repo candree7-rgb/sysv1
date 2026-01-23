@@ -107,12 +107,10 @@ def log_parity(symbol: str, data: dict):
     if not PARITY_LOG:
         return
     import json
-    try:
-        with open(PARITY_LOG_FILE, 'a') as f:
-            data['symbol'] = symbol
-            f.write(json.dumps(data) + '\n')
-    except Exception:
-        pass  # Silent fail in backtest
+    data['symbol'] = symbol
+
+    # Print to console
+    print(f"[PARITY] {json.dumps(data)}", flush=True)
 
 
 @dataclass
