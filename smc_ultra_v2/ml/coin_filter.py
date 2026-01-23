@@ -27,7 +27,17 @@ except ImportError:
     HAS_ML = False
 
 from config.settings import config
-from config.coins import coin_db, CoinConfig
+
+# Simple CoinConfig for ML scoring (coin_db removed for simplicity)
+@dataclass
+class CoinConfig:
+    symbol: str
+    tier: int = 2
+    max_leverage: int = 50
+    min_volume_24h: float = 1000000
+    typical_spread_pct: float = 0.05
+    volatility_mult: float = 1.0
+    enabled: bool = True
 
 
 @dataclass
@@ -113,10 +123,8 @@ class CoinFilter:
         score = 50.0  # Base score
         reasons = []
 
-        # Get coin config
-        coin_config = coin_db.get(symbol)
-        if not coin_config:
-            coin_config = CoinConfig(symbol=symbol, tier=3)
+        # Get coin config (simplified - all coins treated equally)
+        coin_config = CoinConfig(symbol=symbol, tier=2)
 
         # 1. Tier bonus (max 15 points)
         tier_bonus = {1: 15, 2: 10, 3: 5, 4: 0}

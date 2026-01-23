@@ -12,6 +12,7 @@ Flow:
 6. ML Confidence → Final decision
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
@@ -20,7 +21,13 @@ import pandas as pd
 import numpy as np
 
 from config.settings import config
-from config.coins import coin_db
+
+# OB Quality Filters (same as backtest for 1:1 consistency)
+OB_MIN_STRENGTH = float(os.getenv('OB_MIN_STRENGTH', '0.8'))  # very_high_strength config
+OB_MAX_AGE_CANDLES = int(os.getenv('OB_MAX_AGE', '50'))       # very_high_strength config
+
+# MTF Alignment Filter (winner_mtf strategy)
+USE_MTF_ALIGNMENT = os.getenv('USE_MTF_ALIGNMENT', 'true').lower() == 'true'
 
 from data import MTFDataLoader
 from analysis import (
@@ -65,6 +72,7 @@ class Signal:
     # Metadata
     timestamp: datetime = None
     zone: Dict = None
+    ob_age_candles: float = 0.0  # For order expiry calculation
 
 
 class SignalGenerator:
@@ -200,6 +208,64 @@ class SignalGenerator:
             fvgs = self.fvg_detector.detect(mtf_df)
             sweeps = self.liq_detector.find_sweeps(mtf_df)
 
+            # 4b. MTF Alignment Filter (1H trend must align with 5min)
+            direction = 'long' if htf_bias.is_bullish else 'short'
+            current_price = ltf_df['close'].iloc[-1] if ltf_df is not None else mtf_df['close'].iloc[-1]
+
+            if USE_MTF_ALIGNMENT and htf_df is not None and len(htf_df) > 50:
+                # Calculate 1H EMAs if not present
+                if 'ema20' not in htf_df.columns:
+                    htf_df['ema20'] = htf_df['close'].ewm(span=20).mean()
+                    htf_df['ema50'] = htf_df['close'].ewm(span=50).mean()
+
+                # Get last closed 1H candle
+                h1_candle = htf_df.iloc[-1]
+                h1_close = h1_candle['close']
+                h1_ema20 = h1_candle['ema20']
+                h1_ema50 = h1_candle['ema50']
+
+                # Check 1H trend alignment
+                if direction == 'long' and not (h1_close > h1_ema20 > h1_ema50):
+                    return self._no_signal(symbol, regime.regime.value, 'mtf_not_aligned')
+                if direction == 'short' and not (h1_close < h1_ema20 < h1_ema50):
+                    return self._no_signal(symbol, regime.regime.value, 'mtf_not_aligned')
+
+            # Find matching OB with quality filters
+            matching_ob = None
+            ob_age_candles = 0.0
+
+            for ob in order_blocks:
+                # Skip mitigated OBs
+                if ob.is_mitigated:
+                    continue
+
+                # Direction filter
+                if direction == 'long' and not ob.is_bullish:
+                    continue
+                if direction == 'short' and ob.is_bullish:
+                    continue
+
+                # Price in OB zone
+                if not (ob.bottom <= current_price <= ob.top):
+                    continue
+
+                # Strength filter (very_high_strength: >= 0.8)
+                if ob.strength < OB_MIN_STRENGTH:
+                    continue
+
+                # Age filter (very_high_strength: <= 50 candles)
+                ob_age_minutes = (timestamp - ob.timestamp).total_seconds() / 60
+                age_in_candles = ob_age_minutes / 5  # 5min candles
+                if age_in_candles > OB_MAX_AGE_CANDLES:
+                    continue
+
+                matching_ob = ob
+                ob_age_candles = age_in_candles
+                break
+
+            if not matching_ob:
+                return self._no_signal(symbol, regime.regime.value, 'no_quality_ob')
+
             # 5. MTF Setup
             mtf_setup = self.mtf_analyzer.analyze_mtf(
                 mtf_df, htf_bias, order_blocks, fvgs
@@ -239,9 +305,14 @@ class SignalGenerator:
             if adjusted_confidence < adjusted_min:
                 return self._no_signal(symbol, regime.regime.value, 'low_confidence')
 
-            # 9. Calculate targets
-            direction = 'long' if htf_bias.is_bullish else 'short'
-            entry = ltf_trigger.entry_price
+            # 9. Calculate targets using OB EDGE entry (1:1 with backtest)
+            # Long: entry at OB top (limit buy fills here)
+            # Short: entry at OB bottom (limit sell fills here)
+            if direction == 'long':
+                entry = matching_ob.top
+            else:
+                entry = matching_ob.bottom
+
             zone = mtf_setup.zone
 
             targets = self._calculate_targets(
@@ -280,7 +351,8 @@ class SignalGenerator:
                 leverage=leverage_info['leverage'],
                 risk_per_trade=leverage_info['risk_pct'],
                 timestamp=timestamp,
-                zone=zone
+                zone=zone,
+                ob_age_candles=ob_age_candles  # For order expiry calculation
             )
 
         except Exception as e:

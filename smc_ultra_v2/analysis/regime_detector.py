@@ -123,6 +123,11 @@ class RegimeDetector:
         ADX > 40: Strong trend
         ADX < 20: Ranging/Weak
         """
+        # Check if ADX already exists in dataframe
+        if 'adx' in df.columns:
+            val = df['adx'].iloc[-1]
+            return val if not np.isnan(val) else 15.0
+
         high = df['high']
         low = df['low']
         close = df['close']
@@ -141,14 +146,18 @@ class RegimeDetector:
         plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
         minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
 
-        plus_di = 100 * pd.Series(plus_dm).rolling(period).mean() / atr
-        minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / atr
+        # Keep index alignment!
+        plus_di = 100 * pd.Series(plus_dm, index=df.index).rolling(period).mean() / atr
+        minus_di = 100 * pd.Series(minus_dm, index=df.index).rolling(period).mean() / atr
 
-        # ADX
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        # ADX - handle division by zero
+        di_sum = plus_di + minus_di
+        di_sum = di_sum.replace(0, np.nan)  # Avoid division by zero
+        dx = 100 * abs(plus_di - minus_di) / di_sum
         adx = dx.rolling(period).mean()
 
-        return adx.iloc[-1] if not np.isnan(adx.iloc[-1]) else 0
+        result = adx.iloc[-1]
+        return result if not np.isnan(result) else 15.0  # Default to weak trend instead of 0
 
     def _calc_choppiness(self, df: pd.DataFrame, period: int = 14) -> float:
         """
@@ -272,15 +281,24 @@ class RegimeDetector:
 
         # Determine direction and strength
         total = bullish_score + bearish_score
+
+        # DEBUG: Log scores (first 5 only)
+        if not hasattr(self, '_trend_debug_logged'):
+            self._trend_debug_logged = 0
+        if self._trend_debug_logged < 5:
+            print(f"  [TREND DEBUG] bullish={bullish_score}, bearish={bearish_score}, total={total}")
+            self._trend_debug_logged += 1
+
         if total == 0:
             return 'neutral', 0
 
-        if bullish_score > bearish_score + 2:
+        # Simple majority determines direction
+        if bullish_score > bearish_score:
             return 'up', bullish_score / total
-        elif bearish_score > bullish_score + 2:
+        elif bearish_score > bullish_score:
             return 'down', bearish_score / total
         else:
-            return 'neutral', abs(bullish_score - bearish_score) / total
+            return 'neutral', 0.5
 
     def _classify_regime(
         self,
@@ -294,6 +312,13 @@ class RegimeDetector:
         """
         Classify market regime based on indicators.
         """
+        # DEBUG: Track why we're not getting trends
+        if not hasattr(self, '_debug_logged'):
+            self._debug_logged = 0
+        if self._debug_logged < 5:
+            print(f"  [REGIME DEBUG] ADX={adx:.1f}, trend_dir={trend_direction}, chop={choppiness:.1f}, vol={volume_ratio:.2f}")
+            self._debug_logged += 1
+
         # Low volume = No trade
         if volume_ratio < self.config.low_volume_threshold:
             return MarketRegime.LOW_VOLUME

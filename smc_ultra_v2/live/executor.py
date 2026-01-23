@@ -68,16 +68,27 @@ class BybitExecutor:
 
     def __init__(self):
         self.api_config = config.api
+        # Add timeout to prevent hanging
         self.client = HTTP(
             testnet=self.api_config.testnet,
             api_key=self.api_config.api_key,
-            api_secret=self.api_config.api_secret
+            api_secret=self.api_config.api_secret,
+            recv_window=10000  # 10 second receive window
         )
 
         self.positions: Dict[str, Position] = {}
 
     def get_balance(self) -> Dict:
         """Get account balance"""
+        def safe_float(val, default=0.0):
+            """Safely convert to float, handling empty strings"""
+            if val is None or val == '':
+                return default
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return default
+
         try:
             response = self.client.get_wallet_balance(
                 accountType="UNIFIED",
@@ -88,10 +99,23 @@ class BybitExecutor:
                 coins = response['result']['list'][0]['coin']
                 usdt = next((c for c in coins if c['coin'] == 'USDT'), None)
                 if usdt:
+                    equity = safe_float(usdt.get('equity'), 0)
+                    wallet_balance = safe_float(usdt.get('walletBalance'), 0)
+                    available_to_withdraw = safe_float(usdt.get('availableToWithdraw'), 0)
+                    pnl = safe_float(usdt.get('unrealisedPnl'), 0)
+
+                    # Use walletBalance for trading, not availableToWithdraw
+                    available = wallet_balance if wallet_balance > 0 else equity
+
+                    # Check if account has any balance
+                    if equity == 0 and available == 0:
+                        return {'error': 'No USDT balance in testnet account. Please add funds on testnet.bybit.com'}
+
                     return {
-                        'equity': float(usdt['equity']),
-                        'available': float(usdt['availableToWithdraw']),
-                        'unrealized_pnl': float(usdt.get('unrealisedPnl', 0))
+                        'equity': equity,
+                        'available': available,
+                        'wallet_balance': wallet_balance,
+                        'unrealized_pnl': pnl
                     }
 
             return {'error': response.get('retMsg', 'Unknown error')}
@@ -129,6 +153,30 @@ class BybitExecutor:
             print(f"Error getting position: {e}")
             return None
 
+    def set_isolated_margin(self, symbol: str) -> bool:
+        """Set margin mode to ISOLATED for safety (loss limited to position, not account)"""
+        try:
+            response = self.client.switch_margin_mode(
+                category="linear",
+                symbol=symbol,
+                tradeMode=1,  # 0=cross, 1=isolated
+                buyLeverage="10",  # Required param, will be overwritten by set_leverage
+                sellLeverage="10"
+            )
+            if response['retCode'] == 0:
+                print(f"  [ISOLATED] {symbol} margin mode set to ISOLATED", flush=True)
+                return True
+            # 110026 = already isolated
+            if response['retCode'] == 110026:
+                return True
+            return False
+        except Exception as e:
+            if '110026' in str(e) or 'isolated' in str(e).lower():
+                return True  # Already isolated
+            # Don't fail on this - just warn
+            print(f"  [WARN] Isolated margin: {str(e)[:40]}")
+            return False
+
     def set_leverage(self, symbol: str, leverage: int) -> bool:
         """Set leverage for symbol"""
         try:
@@ -138,10 +186,55 @@ class BybitExecutor:
                 buyLeverage=str(leverage),
                 sellLeverage=str(leverage)
             )
-            return response['retCode'] == 0
+            # 110043 = "leverage not modified" = already set correctly = OK
+            if response['retCode'] == 0 or response['retCode'] == 110043:
+                status = "set" if response['retCode'] == 0 else "already set"
+                print(f"  [LEV] {symbol} leverage {leverage}x ({status})", flush=True)
+                return True
+            print(f"  [WARN] Leverage error: {response.get('retMsg', 'unknown')}")
+            return False
 
         except Exception as e:
+            # Check if it's the "not modified" error in exception message
+            if '110043' in str(e) or 'not modified' in str(e).lower():
+                return True  # Already set, that's fine
             print(f"Error setting leverage: {e}")
+            return False
+
+    def check_position_has_sl(self, symbol: str) -> tuple:
+        """Check if position has SL set. Returns (has_sl, current_sl, entry_price, side)"""
+        try:
+            pos = self.get_position(symbol)
+            if not pos:
+                return (True, None, None, None)  # No position = safe
+
+            has_sl = pos.stop_loss is not None and pos.stop_loss > 0
+            return (has_sl, pos.stop_loss, pos.entry_price, pos.side)
+        except Exception as e:
+            print(f"  [ERR] Check SL: {e}")
+            return (True, None, None, None)  # Assume safe on error
+
+    def set_emergency_sl(self, symbol: str, entry_price: float, side: str, max_loss_pct: float = 2.0) -> bool:
+        """Set emergency SL at max_loss_pct from entry"""
+        try:
+            if side == 'Buy':  # Long position
+                sl_price = entry_price * (1 - max_loss_pct / 100)
+            else:  # Short position
+                sl_price = entry_price * (1 + max_loss_pct / 100)
+
+            response = self.client.set_trading_stop(
+                category="linear",
+                symbol=symbol,
+                stopLoss=str(round(sl_price, 6)),
+                slTriggerBy="LastPrice",
+                positionIdx=0
+            )
+            if response['retCode'] == 0:
+                print(f"  [EMERGENCY SL] {symbol} SL set to {sl_price:.6f} ({max_loss_pct}% max loss)", flush=True)
+                return True
+            return False
+        except Exception as e:
+            print(f"  [ERR] Emergency SL: {e}")
             return False
 
     def open_position(
@@ -150,10 +243,10 @@ class BybitExecutor:
         qty: float = None
     ) -> OrderResult:
         """
-        Open a position based on signal.
+        Open a position based on signal using LIMIT order for precise entry.
 
         Args:
-            signal: Trading signal
+            signal: Trading signal with entry_price
             qty: Quantity (calculated from signal if not provided)
 
         Returns:
@@ -173,16 +266,23 @@ class BybitExecutor:
             if qty <= 0:
                 return OrderResult(success=False, error="Invalid quantity")
 
-            # Place market order
+            # Place LIMIT order at exact entry price for better RR
             response = self.client.place_order(
                 category="linear",
                 symbol=symbol,
                 side=side,
-                orderType=OrderType.MARKET.value,
+                orderType="Limit",
+                price=str(signal.entry_price),
                 qty=str(qty),
-                timeInForce="GTC",
+                timeInForce="PostOnly",  # Maker only = lower fees
                 reduceOnly=False,
-                closeOnTrigger=False
+                closeOnTrigger=False,
+                # Attach TP/SL directly to order
+                takeProfit=str(signal.take_profit),
+                stopLoss=str(signal.stop_loss),
+                tpslMode="Full",
+                tpOrderType="Limit",  # TP as Limit order
+                slOrderType="Market"  # SL as Market for guaranteed exit
             )
 
             if response['retCode'] != 0:
@@ -193,19 +293,44 @@ class BybitExecutor:
 
             order_id = response['result']['orderId']
 
-            # Set TP/SL
-            tp_sl_result = self._set_tp_sl(symbol, signal.direction, signal.take_profit, signal.stop_loss)
-
             return OrderResult(
                 success=True,
                 order_id=order_id,
-                filled_price=signal.entry_price,  # Will be updated by websocket
+                filled_price=signal.entry_price,
                 filled_qty=qty,
                 timestamp=datetime.utcnow()
             )
 
         except Exception as e:
             return OrderResult(success=False, error=str(e))
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        """Cancel a pending order"""
+        try:
+            response = self.client.cancel_order(
+                category="linear",
+                symbol=symbol,
+                orderId=order_id
+            )
+            return response['retCode'] == 0
+        except Exception as e:
+            print(f"Error cancelling order: {e}")
+            return False
+
+    def get_open_orders(self, symbol: str = None) -> list:
+        """Get all open/pending orders"""
+        try:
+            params = {"category": "linear", "settleCoin": "USDT"}  # settleCoin required when no symbol
+            if symbol:
+                params["symbol"] = symbol
+
+            response = self.client.get_open_orders(**params)
+            if response['retCode'] == 0:
+                return response['result']['list']
+            return []
+        except Exception as e:
+            print(f"Error getting open orders: {e}")
+            return []
 
     def close_position(
         self,

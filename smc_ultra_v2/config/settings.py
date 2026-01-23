@@ -54,14 +54,15 @@ class RiskConfig:
     """Risk Management Configuration"""
     risk_level: RiskLevel = RiskLevel.MODERATE
 
-    # Per-trade risk
-    max_risk_per_trade_pct: float = 2.0
+    # Per-trade risk (from env or default)
+    # $100 Account mit 2% = $2 Risk pro Trade
+    max_risk_per_trade_pct: float = float(os.getenv("RISK_PER_TRADE", "2.0"))
     max_daily_risk_pct: float = 6.0
     max_weekly_risk_pct: float = 15.0
 
-    # Leverage
-    max_leverage: int = 50
-    min_leverage: int = 5
+    # Leverage (konservativer für kleine Accounts)
+    max_leverage: int = int(os.getenv("MAX_LEVERAGE", "30"))
+    min_leverage: int = 3
 
     # Drawdown protection
     max_drawdown_pct: float = 20.0
@@ -114,19 +115,19 @@ class ExitConfig:
     min_tp_pct: float = 0.15           # Minimum TP
     max_tp_pct: float = 0.60           # Maximum TP
 
-    # Break-even
-    break_even_at_pct: float = 30.0    # Move SL to BE at 30% of TP
+    # Break-even - lock in profit at 60% of TP
+    break_even_at_pct: float = 60.0    # Move SL to BE at 60% of TP
 
-    # Trailing stop
-    trailing_start_pct: float = 50.0   # Start trailing at 50% of TP
-    trailing_offset_pct: float = 30.0  # Trail 30% behind peak
+    # Trailing stop - maximize gains after 75%
+    trailing_start_pct: float = 75.0   # Start trailing at 75% of TP
+    trailing_offset_pct: float = 25.0  # Trail 25% behind peak (tight)
 
-    # Time-based exit
-    max_trade_duration_minutes: int = 60
+    # Time-based exit - scalps should be FAST
+    max_trade_duration_minutes: int = 30  # 30 min max for scalp
 
-    # Momentum exit
+    # Momentum exit - exit on fading momentum
     enable_momentum_exit: bool = True
-    momentum_exit_min_profit_pct: float = 50.0
+    momentum_exit_min_profit_pct: float = 40.0  # Exit if momentum fades at 40%+
 
 
 @dataclass
@@ -150,37 +151,32 @@ class RegimeConfig:
         'strong_trend_up': {
             'trade': True,
             'direction': 'long_only',
-            'min_confidence': 80,
+            'min_confidence': 90,
             'tp_multiplier': 1.5,
             'leverage_mult': 1.0
         },
         'strong_trend_down': {
             'trade': True,
             'direction': 'short_only',
-            'min_confidence': 80,
+            'min_confidence': 90,
             'tp_multiplier': 1.5,
             'leverage_mult': 1.0
         },
-        'weak_trend': {
-            'trade': True,
-            'direction': 'both',
-            'min_confidence': 85,
-            'tp_multiplier': 1.0,
-            'leverage_mult': 0.8
+        'weak_trend_up': {
+            'trade': False,
+            'reason': 'weak_trend_disabled'
+        },
+        'weak_trend_down': {
+            'trade': False,
+            'reason': 'weak_trend_disabled'
         },
         'ranging': {
-            'trade': True,
-            'direction': 'both',
-            'min_confidence': 90,
-            'tp_multiplier': 0.7,
-            'leverage_mult': 0.6
+            'trade': False,
+            'reason': 'ranging_disabled'
         },
         'high_volatility': {
-            'trade': True,
-            'direction': 'both',
-            'min_confidence': 92,
-            'tp_multiplier': 0.8,
-            'leverage_mult': 0.4
+            'trade': False,
+            'reason': 'high_volatility_disabled'
         },
         'choppy': {
             'trade': False,
