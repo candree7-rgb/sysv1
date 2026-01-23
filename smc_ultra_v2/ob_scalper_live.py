@@ -264,13 +264,23 @@ class OBScalperLive:
             current_price = current_5m['close']
 
             # === 1H MTF CHECK ===
-            h1_candle = df_1h.iloc[-2]  # Use completed 1H candle
+            # Use the last COMPLETED 1H candle (same logic as backtest!)
+            # Check if last candle is still forming (timestamp is current hour)
+            now = datetime.utcnow()
+            current_hour = now.replace(minute=0, second=0, microsecond=0)
+
+            if df_1h.iloc[-1]['timestamp'] >= current_hour:
+                # Last candle is current (incomplete) - use iloc[-2]
+                h1_candle = df_1h.iloc[-2]
+            else:
+                # Last candle is complete - use iloc[-1]
+                h1_candle = df_1h.iloc[-1]
 
             h1_bullish = h1_candle['close'] > h1_candle['ema20'] > h1_candle['ema50']
             h1_bearish = h1_candle['close'] < h1_candle['ema20'] < h1_candle['ema50']
 
             if debug:
-                print(f"      {symbol}: 1H close={h1_candle['close']:.4f} ema20={h1_candle['ema20']:.4f} ema50={h1_candle['ema50']:.4f}")
+                print(f"      {symbol}: 1H candle ts={h1_candle['timestamp']} close={h1_candle['close']:.4f} ema20={h1_candle['ema20']:.4f} ema50={h1_candle['ema50']:.4f}")
                 print(f"      {symbol}: 1H bullish={h1_bullish} bearish={h1_bearish}")
 
             if not h1_bullish and not h1_bearish:
@@ -279,12 +289,17 @@ class OBScalperLive:
 
             # === 4H MTF CHECK ===
             if USE_4H_MTF and df_4h is not None and len(df_4h) > 1:
-                h4_candle = df_4h.iloc[-2]  # Use completed 4H candle
+                # Use the last COMPLETED 4H candle (same logic as backtest!)
+                current_4h = now.replace(hour=(now.hour // 4) * 4, minute=0, second=0, microsecond=0)
+                if df_4h.iloc[-1]['timestamp'] >= current_4h:
+                    h4_candle = df_4h.iloc[-2]
+                else:
+                    h4_candle = df_4h.iloc[-1]
                 h4_bullish = h4_candle['close'] > h4_candle['ema20'] > h4_candle['ema50']
                 h4_bearish = h4_candle['close'] < h4_candle['ema20'] < h4_candle['ema50']
 
                 if debug:
-                    print(f"      {symbol}: 4H close={h4_candle['close']:.4f} ema20={h4_candle['ema20']:.4f} ema50={h4_candle['ema50']:.4f}")
+                    print(f"      {symbol}: 4H candle ts={h4_candle['timestamp']} close={h4_candle['close']:.4f} ema20={h4_candle['ema20']:.4f} ema50={h4_candle['ema50']:.4f}")
                     print(f"      {symbol}: 4H bullish={h4_bullish} bearish={h4_bearish}")
 
                 # 4H must confirm 1H
@@ -301,7 +316,12 @@ class OBScalperLive:
 
             # === DAILY FILTER FOR SHORTS ONLY ===
             if USE_DAILY_FOR_SHORTS and direction == 'short' and df_daily is not None and len(df_daily) > 1:
-                daily_candle = df_daily.iloc[-2]  # Use completed daily candle
+                # Use the last COMPLETED daily candle (same logic as backtest!)
+                current_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                if df_daily.iloc[-1]['timestamp'] >= current_day:
+                    daily_candle = df_daily.iloc[-2]
+                else:
+                    daily_candle = df_daily.iloc[-1]
                 daily_bearish = daily_candle['close'] < daily_candle['ema20'] < daily_candle['ema50']
                 if debug:
                     print(f"      {symbol}: Daily close={daily_candle['close']:.4f} ema20={daily_candle['ema20']:.4f} ema50={daily_candle['ema50']:.4f}")
@@ -312,7 +332,12 @@ class OBScalperLive:
 
             # === DAILY FILTER FOR LONGS (disabled by default) ===
             if USE_DAILY_FOR_LONGS and direction == 'long' and df_daily is not None and len(df_daily) > 1:
-                daily_candle = df_daily.iloc[-2]  # Use completed daily candle
+                # Use the last COMPLETED daily candle
+                current_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                if df_daily.iloc[-1]['timestamp'] >= current_day:
+                    daily_candle = df_daily.iloc[-2]
+                else:
+                    daily_candle = df_daily.iloc[-1]
                 daily_bullish = daily_candle['close'] > daily_candle['ema20'] > daily_candle['ema50']
                 if not daily_bullish:
                     if debug: print(f"      {symbol}: SKIP - Long but Daily NOT bullish")
