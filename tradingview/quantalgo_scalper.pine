@@ -1,27 +1,23 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
 // SMC Scalper Pro - FVG + OB with MTF Bias
 //@version=6
-strategy("SMC Scalper Pro", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, slippage=1)
+strategy("SMC Scalper Pro", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06)
 
 //=============================================================================
 // INPUTS
 //=============================================================================
-grp_bias = "Bias Settings"
-i_bias_mult     = input.int(3, "Bias TF Multiplier", minval=2, maxval=10, group=grp_bias)
-i_ema_fast      = input.int(21, "Fast EMA", minval=5, maxval=50, group=grp_bias)
-i_ema_slow      = input.int(50, "Slow EMA", minval=20, maxval=200, group=grp_bias)
-i_require_bias  = input.bool(false, "Require Bias", group=grp_bias)
+i_bias_mult     = input.int(3, "Bias TF Multiplier", minval=2, maxval=10)
+i_ema_fast      = input.int(21, "Fast EMA", minval=5, maxval=50)
+i_ema_slow      = input.int(50, "Slow EMA", minval=20, maxval=200)
+i_require_bias  = input.bool(false, "Require Bias")
 
-grp_poi = "POI Settings"
-i_use_fvg       = input.bool(true, "Use FVG", group=grp_poi)
-i_use_ob        = input.bool(true, "Use OB", group=grp_poi)
+i_use_fvg       = input.bool(true, "Use FVG")
+i_use_ob        = input.bool(true, "Use OB")
 
-grp_risk = "Risk Management"
-i_sl_pct        = input.float(1.0, "SL %", minval=0.1, maxval=5.0, step=0.1, group=grp_risk)
-i_tp_rr         = input.float(1.2, "TP RR", minval=0.5, maxval=5.0, step=0.1, group=grp_risk)
+i_sl_pct        = input.float(1.0, "SL %", minval=0.1, maxval=5.0, step=0.1)
+i_tp_rr         = input.float(1.2, "TP RR", minval=0.5, maxval=5.0, step=0.1)
 
-grp_display = "Display"
-i_show_table    = input.bool(true, "Show Table", group=grp_display)
+i_show_table    = input.bool(true, "Show Table")
 
 //=============================================================================
 // TIMEFRAME
@@ -29,120 +25,106 @@ i_show_table    = input.bool(true, "Show Table", group=grp_display)
 tfMins = timeframe.isminutes ? timeframe.multiplier : timeframe.isdaily ? 1440 : 60
 biasTF = tfMins * i_bias_mult
 biasTFStr = biasTF < 60 ? str.tostring(biasTF) : str.tostring(biasTF/60) + "H"
-currentTFStr = str.tostring(tfMins)
 
 //=============================================================================
 // MTF BIAS
 //=============================================================================
 [emaF, emaS] = request.security(syminfo.tickerid, biasTFStr, [ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)])
 bias = emaF > emaS ? 1 : emaF < emaS ? -1 : 0
-biasStr = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
+biasStr = bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
 
 //=============================================================================
-// FVG DETECTION
+// FVG DETECTION - Simple approach: just detect and immediately trade
 //=============================================================================
-bullFvg = low > high[2]
-bearFvg = high < low[2]
-
-var float bFvgTop = na, var float bFvgBtm = na
-var float sFvgTop = na, var float sFvgBtm = na
-
-if i_use_fvg and bullFvg
-    bFvgTop := low
-    bFvgBtm := high[2]
-
-if i_use_fvg and bearFvg
-    sFvgTop := low[2]
-    sFvgBtm := high
+bullFvg = i_use_fvg and low > high[2]
+bearFvg = i_use_fvg and high < low[2]
 
 //=============================================================================
 // OB DETECTION
 //=============================================================================
 atr = ta.atr(14)
-bullOb = close > open and (close - open) > atr * 0.3 and close[1] < open[1]
-bearOb = close < open and (open - close) > atr * 0.3 and close[1] > open[1]
-
-var float bObTop = na, var float bObBtm = na
-var float sObTop = na, var float sObBtm = na
-
-if i_use_ob and bullOb
-    bObTop := high[1]
-    bObBtm := low[1]
-
-if i_use_ob and bearOb
-    sObTop := high[1]
-    sObBtm := low[1]
+bullOb = i_use_ob and close > open and (close - open) > atr * 0.3 and close[1] < open[1]
+bearOb = i_use_ob and close < open and (open - close) > atr * 0.3 and close[1] > open[1]
 
 //=============================================================================
-// ENTRY SIGNALS
+// ENTRY SIGNALS - Direct entry on detection, no zone storage
 //=============================================================================
-longFvg = not na(bFvgTop) and low <= bFvgTop and close > bFvgBtm
-longOb = not na(bObTop) and low <= bObTop and close > bObBtm
-longSignal = (longFvg or longOb) and strategy.position_size == 0 and (not i_require_bias or bias >= 0)
-
-shortFvg = not na(sFvgTop) and high >= sFvgBtm and close < sFvgTop
-shortOb = not na(sObTop) and high >= sObBtm and close < sObTop
-shortSignal = (shortFvg or shortOb) and strategy.position_size == 0 and (not i_require_bias or bias <= 0)
+longSignal = (bullFvg or bullOb) and strategy.position_size == 0 and (not i_require_bias or bias >= 0)
+shortSignal = (bearFvg or bearOb) and strategy.position_size == 0 and (not i_require_bias or bias <= 0)
 
 //=============================================================================
-// STRATEGY - SIMPLE ATR-BASED TP/SL
+// POSITION TRACKING
 //=============================================================================
-slAmount = close * (i_sl_pct / 100)
-tpAmount = slAmount * i_tp_rr
+var float myEntry = na
+var float mySL = na
+var float myTP = na
+var bool inLong = false
+var bool inShort = false
 
-if longSignal
+// Entry
+if longSignal and not inLong and not inShort
+    myEntry := close
+    mySL := close * (1 - i_sl_pct/100)
+    myTP := close * (1 + i_sl_pct/100 * i_tp_rr)
+    inLong := true
     strategy.entry("L", strategy.long)
-    strategy.exit("XL", "L", profit=tpAmount, loss=slAmount)
-    // Clear zone
-    if longFvg
-        bFvgTop := na
-    else
-        bObTop := na
 
-if shortSignal
+if shortSignal and not inLong and not inShort
+    myEntry := close
+    mySL := close * (1 + i_sl_pct/100)
+    myTP := close * (1 - i_sl_pct/100 * i_tp_rr)
+    inShort := true
     strategy.entry("S", strategy.short)
-    strategy.exit("XS", "S", profit=tpAmount, loss=slAmount)
-    // Clear zone
-    if shortFvg
-        sFvgTop := na
-    else
-        sObTop := na
+
+// Exit Logic - Check EVERY bar
+if inLong
+    // TP Hit
+    if high >= myTP
+        strategy.close("L", comment="TP")
+        inLong := false
+        myEntry := na
+    // SL Hit
+    else if low <= mySL
+        strategy.close("L", comment="SL")
+        inLong := false
+        myEntry := na
+
+if inShort
+    // TP Hit
+    if low <= myTP
+        strategy.close("S", comment="TP")
+        inShort := false
+        myEntry := na
+    // SL Hit
+    else if high >= mySL
+        strategy.close("S", comment="SL")
+        inShort := false
+        myEntry := na
+
+// Safety reset if position closed externally
+if strategy.position_size == 0
+    if inLong or inShort
+        inLong := false
+        inShort := false
+        myEntry := na
+        mySL := na
+        myTP := na
 
 //=============================================================================
 // VISUALS
 //=============================================================================
-plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
-plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(longSignal and not inLong[1], "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortSignal and not inShort[1], "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
 
-// Show TP/SL levels when in position
-var float entryP = na
-var float slP = na
-var float tpP = na
-
-if strategy.position_size > 0 and strategy.position_size[1] == 0
-    entryP := strategy.position_avg_price
-    slP := entryP - slAmount
-    tpP := entryP + tpAmount
-
-if strategy.position_size < 0 and strategy.position_size[1] == 0
-    entryP := strategy.position_avg_price
-    slP := entryP + slAmount
-    tpP := entryP - tpAmount
-
-if strategy.position_size == 0
-    entryP := na
-    slP := na
-    tpP := na
-
-plot(entryP, "Entry", color.blue, 1, plot.style_linebr)
-plot(tpP, "TP", color.green, 2, plot.style_linebr)
-plot(slP, "SL", color.red, 2, plot.style_linebr)
+plot(inLong or inShort ? myEntry : na, "Entry", color.blue, 1, plot.style_linebr)
+plot(inLong or inShort ? myTP : na, "TP", color.green, 2, plot.style_linebr)
+plot(inLong or inShort ? mySL : na, "SL", color.red, 2, plot.style_linebr)
 
 //=============================================================================
 // PERFORMANCE TABLE
 //=============================================================================
 if i_show_table and barstate.islast
-    var table t = table.new(position.top_right, 2, 11, color.new(color.black, 20), border_color=color.gray, border_width=1)
+    var table t = table.new(position.top_right, 2, 10, color.new(color.black, 20), border_color=color.gray, border_width=1)
 
     wins = strategy.wintrades
     losses = strategy.losstrades
@@ -156,38 +138,29 @@ if i_show_table and barstate.islast
     table.cell(t, 0, 0, "METRICS", text_color=color.white, bgcolor=color.gray)
     table.cell(t, 1, 0, "VALUES", text_color=color.white, bgcolor=color.gray)
 
-    table.cell(t, 0, 1, "Bias TF / Chart", text_color=color.gray)
-    table.cell(t, 1, 1, biasTFStr + " / " + currentTFStr, text_color=color.aqua)
+    table.cell(t, 0, 1, "Bias", text_color=color.gray)
+    table.cell(t, 1, 1, biasStr, text_color=bias==1?color.green:bias==-1?color.red:color.gray)
 
-    table.cell(t, 0, 2, "Bias", text_color=color.gray)
-    table.cell(t, 1, 2, biasStr, text_color=bias==1?color.green:bias==-1?color.red:color.gray)
+    table.cell(t, 0, 2, "Trades", text_color=color.gray)
+    table.cell(t, 1, 2, str.tostring(total), text_color=color.white)
 
-    table.cell(t, 0, 3, "Trades", text_color=color.gray)
-    table.cell(t, 1, 3, str.tostring(total), text_color=color.white)
+    table.cell(t, 0, 3, "W / L", text_color=color.gray)
+    table.cell(t, 1, 3, str.tostring(wins) + " / " + str.tostring(losses), text_color=color.white)
 
-    table.cell(t, 0, 4, "W / L", text_color=color.gray)
-    table.cell(t, 1, 4, str.tostring(wins) + " / " + str.tostring(losses), text_color=color.white)
+    table.cell(t, 0, 4, "Win Rate", text_color=color.gray)
+    table.cell(t, 1, 4, str.tostring(wr, "#.#") + "%", text_color=wr>=55?color.green:wr>=45?color.yellow:color.red)
 
-    table.cell(t, 0, 5, "Win Rate", text_color=color.gray)
-    table.cell(t, 1, 5, str.tostring(wr, "#.#") + "%", text_color=wr>=55?color.green:wr>=45?color.yellow:color.red)
+    table.cell(t, 0, 5, "Profit Factor", text_color=color.gray)
+    table.cell(t, 1, 5, str.tostring(pf, "#.##"), text_color=pf>=1.5?color.green:pf>=1?color.yellow:color.red)
 
-    table.cell(t, 0, 6, "Profit Factor", text_color=color.gray)
-    table.cell(t, 1, 6, str.tostring(pf, "#.##"), text_color=pf>=1.5?color.green:pf>=1?color.yellow:color.red)
+    table.cell(t, 0, 6, "Max DD", text_color=color.gray)
+    table.cell(t, 1, 6, str.tostring(dd, "#.#") + "%", text_color=color.red)
 
-    table.cell(t, 0, 7, "Max DD", text_color=color.gray)
-    table.cell(t, 1, 7, str.tostring(dd, "#.#") + "%", text_color=color.red)
+    table.cell(t, 0, 7, "SL/TP", text_color=color.gray)
+    table.cell(t, 1, 7, str.tostring(i_sl_pct,"#.#") + "% / " + str.tostring(i_sl_pct*i_tp_rr,"#.#") + "%", text_color=color.aqua)
 
-    table.cell(t, 0, 8, "SL / TP", text_color=color.gray)
-    table.cell(t, 1, 8, str.tostring(i_sl_pct,"#.#") + "% / " + str.tostring(i_sl_pct*i_tp_rr,"#.#") + "%", text_color=color.aqua)
+    table.cell(t, 0, 8, "Net Profit", text_color=color.gray)
+    table.cell(t, 1, 8, str.tostring(npPct, "#.#") + "%", text_color=np>=0?color.green:color.red)
 
-    table.cell(t, 0, 9, "Net Profit", text_color=color.gray)
-    table.cell(t, 1, 9, str.tostring(npPct, "#.#") + "%", text_color=np>=0?color.green:color.red)
-
-    table.cell(t, 0, 10, "Bars", text_color=color.gray)
-    table.cell(t, 1, 10, str.tostring(bar_index), text_color=color.white)
-
-//=============================================================================
-// ALERTS
-//=============================================================================
-alertcondition(longSignal, "Long", "LONG {{ticker}}")
-alertcondition(shortSignal, "Short", "SHORT {{ticker}}")
+    table.cell(t, 0, 9, "Bars", text_color=color.gray)
+    table.cell(t, 1, 9, str.tostring(bar_index), text_color=color.white)
