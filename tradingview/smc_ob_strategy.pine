@@ -492,8 +492,8 @@ if short_condition and bear_qty > 0
         array.remove(bear_ob_strength, active_bear_ob_idx)
 
 //=============================================================================
-// EXIT LOGIC: TP1 (50%) → BE → TP2 (50%)
-// Using TWO separate exits from start, updating SL after TP1
+// EXIT LOGIC: TP1 (50%) + TP2 (50%) + Dynamic SL → BE after TP1
+// Simple approach: Set ALL exits from start, only update SL after TP1
 //=============================================================================
 
 // Track initial position size for correct partial exits
@@ -521,29 +521,21 @@ if position_was_reduced and position_still_open and not tp1_taken
 
 // Long Position Management
 if strategy.position_size > 0
-    if not tp1_taken
-        // Phase 1: Exit 50% at TP1, full SL protection
-        strategy.exit("TP1_L", "Long", qty=tp1_qty, limit=active_tp1, stop=current_sl, comment="TP1")
-        // Backup SL for entire position (in case TP1 limit doesn't fill first)
-        strategy.exit("SL_L", "Long", stop=current_sl, comment="SL")
-    else
-        // Phase 2: After TP1, cancel old orders and set TP2 with BE
-        strategy.cancel("TP1_L")
-        strategy.cancel("SL_L")
-        strategy.exit("TP2_L", "Long", limit=active_tp2, stop=current_sl, comment="TP2+BE")
+    // Always set TP1 for 50% (limit only, no stop)
+    strategy.exit("TP1_L", "Long", qty=tp1_qty, limit=active_tp1, comment="TP1")
+    // Always set TP2 for remaining 50% (limit only, no stop)
+    strategy.exit("TP2_L", "Long", qty=tp2_qty, limit=active_tp2, comment="TP2")
+    // Separate SL that updates to BE after TP1
+    strategy.exit("SL_L", "Long", stop=current_sl, comment=tp1_taken ? "BE" : "SL")
 
 // Short Position Management
 if strategy.position_size < 0
-    if not tp1_taken
-        // Phase 1: Exit 50% at TP1, full SL protection
-        strategy.exit("TP1_S", "Short", qty=tp1_qty, limit=active_tp1, stop=current_sl, comment="TP1")
-        // Backup SL for entire position
-        strategy.exit("SL_S", "Short", stop=current_sl, comment="SL")
-    else
-        // Phase 2: After TP1, cancel old orders and set TP2 with BE
-        strategy.cancel("TP1_S")
-        strategy.cancel("SL_S")
-        strategy.exit("TP2_S", "Short", limit=active_tp2, stop=current_sl, comment="TP2+BE")
+    // Always set TP1 for 50% (limit only, no stop)
+    strategy.exit("TP1_S", "Short", qty=tp1_qty, limit=active_tp1, comment="TP1")
+    // Always set TP2 for remaining 50% (limit only, no stop)
+    strategy.exit("TP2_S", "Short", qty=tp2_qty, limit=active_tp2, comment="TP2")
+    // Separate SL that updates to BE after TP1
+    strategy.exit("SL_S", "Short", stop=current_sl, comment=tp1_taken ? "BE" : "SL")
 
 // Reset on full position close
 if strategy.position_size == 0 and strategy.position_size[1] != 0
