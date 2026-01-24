@@ -238,57 +238,67 @@ calcOBStrength(int lookback) =>
 
 // Create bullish OB on structure break
 if bull_break and not na(last_swing_low_bar)
-    // Find the lowest candle between last swing low and break
-    lowest_idx = 0
-    lowest_val = low
-    for i = 1 to math.min(bar_index - last_swing_low_bar, 50)
-        if low[i] < lowest_val
-            lowest_val := low[i]
-            lowest_idx := i
+    // Calculate lookback distance (capped at 50, min 1, within buffer limit of 300)
+    bars_since_swing = bar_index - last_swing_low_bar
+    max_lookback = math.min(math.max(bars_since_swing, 1), 50)
 
-    ob_top = math.max(open[lowest_idx], close[lowest_idx])
-    ob_btm = low[lowest_idx]
-    ob_str = calcOBStrength(lowest_idx)
+    // Only proceed if within valid range
+    if max_lookback > 0 and max_lookback <= 50
+        lowest_idx = 0
+        lowest_val = low
+        for i = 1 to max_lookback
+            if low[i] < lowest_val
+                lowest_val := low[i]
+                lowest_idx := i
 
-    if ob_str >= i_ob_strength
-        array.unshift(bull_ob_top, ob_top)
-        array.unshift(bull_ob_btm, ob_btm)
-        array.unshift(bull_ob_bar, bar_index - lowest_idx)
-        array.unshift(bull_ob_strength, ob_str)
+        ob_top = math.max(open[lowest_idx], close[lowest_idx])
+        ob_btm = low[lowest_idx]
+        ob_str = calcOBStrength(lowest_idx)
 
-        // Limit array size
-        if array.size(bull_ob_top) > i_ob_num
-            array.pop(bull_ob_top)
-            array.pop(bull_ob_btm)
-            array.pop(bull_ob_bar)
-            array.pop(bull_ob_strength)
+        if ob_str >= i_ob_strength
+            array.unshift(bull_ob_top, ob_top)
+            array.unshift(bull_ob_btm, ob_btm)
+            array.unshift(bull_ob_bar, bar_index - lowest_idx)
+            array.unshift(bull_ob_strength, ob_str)
+
+            // Limit array size
+            if array.size(bull_ob_top) > i_ob_num
+                array.pop(bull_ob_top)
+                array.pop(bull_ob_btm)
+                array.pop(bull_ob_bar)
+                array.pop(bull_ob_strength)
 
 // Create bearish OB on structure break
 if bear_break and not na(last_swing_high_bar)
-    // Find the highest candle between last swing high and break
-    highest_idx = 0
-    highest_val = high
-    for i = 1 to math.min(bar_index - last_swing_high_bar, 50)
-        if high[i] > highest_val
-            highest_val := high[i]
-            highest_idx := i
+    // Calculate lookback distance (capped at 50, min 1, within buffer limit of 300)
+    bars_since_swing = bar_index - last_swing_high_bar
+    max_lookback = math.min(math.max(bars_since_swing, 1), 50)
 
-    ob_top = high[highest_idx]
-    ob_btm = math.min(open[highest_idx], close[highest_idx])
-    ob_str = calcOBStrength(highest_idx)
+    // Only proceed if within valid range
+    if max_lookback > 0 and max_lookback <= 50
+        highest_idx = 0
+        highest_val = high
+        for i = 1 to max_lookback
+            if high[i] > highest_val
+                highest_val := high[i]
+                highest_idx := i
 
-    if ob_str >= i_ob_strength
-        array.unshift(bear_ob_top, ob_top)
-        array.unshift(bear_ob_btm, ob_btm)
-        array.unshift(bear_ob_bar, bar_index - highest_idx)
-        array.unshift(bear_ob_strength, ob_str)
+        ob_top = high[highest_idx]
+        ob_btm = math.min(open[highest_idx], close[highest_idx])
+        ob_str = calcOBStrength(highest_idx)
 
-        // Limit array size
-        if array.size(bear_ob_top) > i_ob_num
-            array.pop(bear_ob_top)
-            array.pop(bear_ob_btm)
-            array.pop(bear_ob_bar)
-            array.pop(bear_ob_strength)
+        if ob_str >= i_ob_strength
+            array.unshift(bear_ob_top, ob_top)
+            array.unshift(bear_ob_btm, ob_btm)
+            array.unshift(bear_ob_bar, bar_index - highest_idx)
+            array.unshift(bear_ob_strength, ob_str)
+
+            // Limit array size
+            if array.size(bear_ob_top) > i_ob_num
+                array.pop(bear_ob_top)
+                array.pop(bear_ob_btm)
+                array.pop(bear_ob_bar)
+                array.pop(bear_ob_strength)
 
 //=============================================================================
 // ORDER BLOCK MITIGATION & ENTRY SIGNALS
@@ -467,48 +477,45 @@ var float initial_qty = na
 var float tp1_qty = na
 var float tp2_qty = na
 
-// Store initial qty on entry
+// Store initial qty on entry (when position opens)
 if strategy.position_size != 0 and strategy.position_size[1] == 0
     initial_qty := math.abs(strategy.position_size)
     tp1_qty := initial_qty * (i_tp1_pct / 100)
     tp2_qty := initial_qty - tp1_qty
+    tp1_taken := false  // Reset on new position
+
+// Detect TP1 fill by comparing current vs previous position
+// TP1 is filled when: position was reduced BUT still exists
+position_was_reduced = math.abs(strategy.position_size) < math.abs(strategy.position_size[1])
+position_still_open = strategy.position_size != 0
+
+if position_was_reduced and position_still_open and not tp1_taken
+    tp1_taken := true
+    if i_move_sl_be and not na(active_entry)
+        active_sl := active_entry  // Move SL to breakeven
 
 // Long Position Management
 if strategy.position_size > 0
-    current_pos = strategy.position_size
-
-    // TP1 not yet taken
-    if not tp1_taken and not na(active_tp1)
-        // Set TP1 exit for 50% with SL protection
+    if not tp1_taken and not na(active_tp1) and not na(tp1_qty)
+        // Phase 1: Set TP1 exit for 50% + SL for protection
         strategy.exit("TP1", "Long", qty=tp1_qty, limit=active_tp1, stop=active_sl, comment="TP1")
+        // Also set SL for remaining position
+        strategy.exit("SL", "Long", stop=active_sl, comment="SL")
 
-        // Detect if TP1 was filled (position reduced but not closed)
-        if current_pos < initial_qty and current_pos > 0
-            tp1_taken := true
-            if i_move_sl_be
-                active_sl := active_entry  // Move SL to breakeven
-
-    // After TP1: exit remaining with BE stop and TP2
     if tp1_taken and not na(active_tp2)
+        // Phase 2: After TP1 filled, set TP2 with BE stop
         strategy.exit("TP2", "Long", limit=active_tp2, stop=active_sl, comment="TP2+BE")
 
 // Short Position Management
 if strategy.position_size < 0
-    current_pos = math.abs(strategy.position_size)
-
-    // TP1 not yet taken
-    if not tp1_taken and not na(active_tp1)
-        // Set TP1 exit for 50% with SL protection
+    if not tp1_taken and not na(active_tp1) and not na(tp1_qty)
+        // Phase 1: Set TP1 exit for 50% + SL for protection
         strategy.exit("TP1", "Short", qty=tp1_qty, limit=active_tp1, stop=active_sl, comment="TP1")
+        // Also set SL for remaining position
+        strategy.exit("SL", "Short", stop=active_sl, comment="SL")
 
-        // Detect if TP1 was filled (position reduced but not closed)
-        if current_pos < initial_qty and current_pos > 0
-            tp1_taken := true
-            if i_move_sl_be
-                active_sl := active_entry  // Move SL to breakeven
-
-    // After TP1: exit remaining with BE stop and TP2
     if tp1_taken and not na(active_tp2)
+        // Phase 2: After TP1 filled, set TP2 with BE stop
         strategy.exit("TP2", "Short", limit=active_tp2, stop=active_sl, comment="TP2+BE")
 
 // Reset on full position close
