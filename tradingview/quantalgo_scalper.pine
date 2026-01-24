@@ -1,83 +1,95 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
-// SMC Scalper Pro - FVG + OB with MTF Bias (based on QuantAlgo style)
+// SMC Scalper Pro - HIGH QUALITY SIGNALS ONLY
 //@version=6
 strategy("SMC Scalper Pro", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, process_orders_on_close=true)
 
 //=============================================================================
 // INPUTS
 //=============================================================================
-grp_bias = "Bias Settings"
-i_bias_mult     = input.int(3, "Bias TF Multiplier", minval=2, maxval=10, group=grp_bias)
+grp_bias = "Trend Filter (STRICT)"
 i_ema_fast      = input.int(21, "Fast EMA", minval=5, maxval=50, group=grp_bias)
 i_ema_slow      = input.int(50, "Slow EMA", minval=20, maxval=200, group=grp_bias)
-i_require_bias  = input.bool(false, "Require Bias Alignment", group=grp_bias)
+i_ema_sep       = input.float(0.5, "Min EMA Separation %", minval=0.1, maxval=2.0, step=0.1, group=grp_bias, tooltip="EMAs must be this far apart = clear trend")
 
-grp_poi = "POI Detection"
-i_use_fvg       = input.bool(true, "Use FVG", group=grp_poi)
-i_use_ob        = input.bool(true, "Use OB", group=grp_poi)
+grp_signal = "Signal Quality"
+i_min_candle    = input.float(1.5, "Min Candle Size (ATR)", minval=0.5, maxval=3.0, step=0.1, group=grp_signal, tooltip="Only big impulsive candles")
+i_vol_mult      = input.float(1.2, "Min Volume Multiplier", minval=1.0, maxval=3.0, step=0.1, group=grp_signal, tooltip="Volume must be above average")
+i_rsi_ob        = input.int(70, "RSI Overbought", minval=60, maxval=90, group=grp_signal)
+i_rsi_os        = input.int(30, "RSI Oversold", minval=10, maxval=40, group=grp_signal)
 
 grp_risk = "Risk Management"
 i_sl_pct        = input.float(1.0, "SL %", minval=0.1, maxval=5.0, step=0.1, group=grp_risk)
-i_tp_rr         = input.float(1.5, "TP Risk:Reward", minval=0.5, maxval=5.0, step=0.1, group=grp_risk)
+i_tp_rr         = input.float(2.0, "TP Risk:Reward", minval=1.0, maxval=5.0, step=0.1, group=grp_risk)
+i_cooldown      = input.int(20, "Cooldown Bars", minval=5, maxval=100, group=grp_risk)
 
 grp_display = "Display"
 i_show_table    = input.bool(true, "Show Performance Table", group=grp_display)
 
 //=============================================================================
-// TIMEFRAME CALCULATION
+// INDICATORS
 //=============================================================================
-tfMins = timeframe.isminutes ? timeframe.multiplier : timeframe.isdaily ? 1440 : 60
-biasTF = tfMins * i_bias_mult
-biasTFStr = biasTF < 60 ? str.tostring(biasTF) : str.tostring(biasTF/60) + "H"
-
-//=============================================================================
-// MTF BIAS (Higher Timeframe Trend)
-//=============================================================================
-[htfEmaFast, htfEmaSlow] = request.security(syminfo.tickerid, biasTFStr, [ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)], lookahead=barmerge.lookahead_off)
-bias = htfEmaFast > htfEmaSlow ? 1 : htfEmaFast < htfEmaSlow ? -1 : 0
-biasStr = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
-
-//=============================================================================
-// FVG DETECTION (Fair Value Gap)
-//=============================================================================
-bullFvg = i_use_fvg and low > high[2]
-bearFvg = i_use_fvg and high < low[2]
-
-//=============================================================================
-// OB DETECTION (Order Block - simplified)
-//=============================================================================
+emaFast = ta.ema(close, i_ema_fast)
+emaSlow = ta.ema(close, i_ema_slow)
 atr = ta.atr(14)
-bullOb = i_use_ob and close > open and (close - open) > atr * 0.3 and close[1] < open[1]
-bearOb = i_use_ob and close < open and (open - close) > atr * 0.3 and close[1] > open[1]
+rsi = ta.rsi(close, 14)
+avgVol = ta.sma(volume, 20)
 
 //=============================================================================
-// ENTRY SIGNALS
+// TREND DETECTION - Must have CLEAR trend (EMA separation)
 //=============================================================================
-longSignal = (bullFvg or bullOb) and strategy.position_size == 0
-if i_require_bias
-    longSignal := longSignal and bias >= 0
+emaSeparation = math.abs(emaFast - emaSlow) / close * 100
+clearTrend = emaSeparation >= i_ema_sep
 
-shortSignal = (bearFvg or bearOb) and strategy.position_size == 0
-if i_require_bias
-    shortSignal := shortSignal and bias <= 0
+bullTrend = emaFast > emaSlow and clearTrend
+bearTrend = emaFast < emaSlow and clearTrend
 
 //=============================================================================
-// POSITION STATE TRACKING - Set on entry, persist until exit
+// SIGNAL QUALITY FILTERS
+//=============================================================================
+candleSize = math.abs(close - open)
+bigCandle = candleSize > atr * i_min_candle
+highVolume = volume > avgVol * i_vol_mult
+
+// Bullish signal: Big green candle, after red candle, with volume, RSI not overbought
+bullCandle = close > open and bigCandle and highVolume and close[1] < open[1]
+bullRsiOK = rsi < i_rsi_ob and rsi > 40  // Not overbought, not too weak
+
+// Bearish signal: Big red candle, after green candle, with volume, RSI not oversold
+bearCandle = close < open and bigCandle and highVolume and close[1] > open[1]
+bearRsiOK = rsi > i_rsi_os and rsi < 60  // Not oversold, not too strong
+
+//=============================================================================
+// COOLDOWN
+//=============================================================================
+var int barsSinceExit = 999
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit := barsSinceExit + 1
+
+cooldownOK = barsSinceExit >= i_cooldown
+
+//=============================================================================
+// FINAL SIGNALS - ALL CONDITIONS MUST BE TRUE
+//=============================================================================
+longSignal = bullTrend and bullCandle and bullRsiOK and cooldownOK and strategy.position_size == 0
+shortSignal = bearTrend and bearCandle and bearRsiOK and cooldownOK and strategy.position_size == 0
+
+//=============================================================================
+// POSITION STATE
 //=============================================================================
 var float entry_price = na
 var float sl_price = na
 var float tp_price = na
-var bool is_long = false
 
 //=============================================================================
-// ENTRIES - Set levels BEFORE calling strategy.entry
+// ENTRIES
 //=============================================================================
 if longSignal
     entry_price := close
     sl_distance = close * (i_sl_pct / 100)
     sl_price := close - sl_distance
     tp_price := close + (sl_distance * i_tp_rr)
-    is_long := true
     strategy.entry("Long", strategy.long)
 
 if shortSignal
@@ -85,47 +97,39 @@ if shortSignal
     sl_distance = close * (i_sl_pct / 100)
     sl_price := close + sl_distance
     tp_price := close - (sl_distance * i_tp_rr)
-    is_long := false
     strategy.entry("Short", strategy.short)
 
 //=============================================================================
-// DETECT NEW POSITION - Recalculate SL/TP if they got reset
-// This catches cases where exit and entry happen on same bar
+// FALLBACK
 //=============================================================================
 just_entered = strategy.position_size != 0 and strategy.position_size[1] == 0
 if just_entered and na(sl_price)
-    // Fallback: recalculate from position avg price
     entry_price := strategy.position_avg_price
     sl_distance = entry_price * (i_sl_pct / 100)
     if strategy.position_size > 0
         sl_price := entry_price - sl_distance
         tp_price := entry_price + (sl_distance * i_tp_rr)
-        is_long := true
     else
         sl_price := entry_price + sl_distance
         tp_price := entry_price - (sl_distance * i_tp_rr)
-        is_long := false
 
 //=============================================================================
-// EXIT LOGIC WITH GAP PROTECTION
-// If price gaps through SL, close immediately at market
+// EXIT WITH GAP PROTECTION
 //=============================================================================
 if strategy.position_size > 0 and not na(sl_price) and not na(tp_price)
-    // GAP PROTECTION: If bar opens below SL, close immediately
     if open < sl_price
         strategy.close("Long", comment="SL Gap")
     else
         strategy.exit("XL", "Long", limit=tp_price, stop=sl_price)
 
 if strategy.position_size < 0 and not na(sl_price) and not na(tp_price)
-    // GAP PROTECTION: If bar opens above SL, close immediately
     if open > sl_price
         strategy.close("Short", comment="SL Gap")
     else
         strategy.exit("XS", "Short", limit=tp_price, stop=sl_price)
 
 //=============================================================================
-// RESET ON POSITION CLOSE
+// RESET
 //=============================================================================
 if strategy.position_size == 0 and strategy.position_size[1] != 0
     entry_price := na
@@ -135,42 +139,43 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0
 //=============================================================================
 // VISUALS
 //=============================================================================
-plotshape(longSignal, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
-plotshape(shortSignal, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+
+plot(emaFast, "EMA Fast", color.new(color.blue, 30), 2)
+plot(emaSlow, "EMA Slow", color.new(color.orange, 30), 2)
 
 plot(strategy.position_size != 0 ? entry_price : na, "Entry", color.blue, 1, plot.style_linebr)
 plot(strategy.position_size != 0 ? tp_price : na, "TP", color.green, 2, plot.style_linebr)
 plot(strategy.position_size != 0 ? sl_price : na, "SL", color.red, 2, plot.style_linebr)
 
-emaFastCurrent = ta.ema(close, i_ema_fast)
-emaSlowCurrent = ta.ema(close, i_ema_slow)
-plot(emaFastCurrent, "EMA Fast", color.new(color.blue, 70), 1)
-plot(emaSlowCurrent, "EMA Slow", color.new(color.orange, 70), 1)
+// Trend background
+bgcolor(bullTrend ? color.new(color.green, 95) : bearTrend ? color.new(color.red, 95) : na)
 
 //=============================================================================
-// PERFORMANCE TABLE (QuantAlgo Style)
+// PERFORMANCE TABLE
 //=============================================================================
+var table perfTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+
 if i_show_table and barstate.islast
-    var table perfTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
-
     wins = strategy.wintrades
     losses = strategy.losstrades
     total = strategy.closedtrades
     winRate = total > 0 ? wins / total * 100 : 0
     profitFactor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0
     maxDD = strategy.max_drawdown / strategy.initial_capital * 100
-    netProfit = strategy.netprofit
-    netProfitPct = netProfit / strategy.initial_capital * 100
+    netProfitPct = strategy.netprofit / strategy.initial_capital * 100
 
     table.cell(perfTable, 0, 0, "SMC SCALPER PRO", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
-    table.cell(perfTable, 1, 0, "v1.1", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
+    table.cell(perfTable, 1, 0, "v2.0", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
 
-    table.cell(perfTable, 0, 1, "Bias TF", text_color=color.gray, text_size=size.small)
-    table.cell(perfTable, 1, 1, biasTFStr, text_color=color.white, text_size=size.small)
+    trendStr = bullTrend ? "BULL" : bearTrend ? "BEAR" : "NONE"
+    trendCol = bullTrend ? color.green : bearTrend ? color.red : color.gray
+    table.cell(perfTable, 0, 1, "Trend", text_color=color.gray, text_size=size.small)
+    table.cell(perfTable, 1, 1, trendStr, text_color=trendCol, text_size=size.small)
 
-    table.cell(perfTable, 0, 2, "Bias", text_color=color.gray, text_size=size.small)
-    biasColor = bias == 1 ? color.green : bias == -1 ? color.red : color.gray
-    table.cell(perfTable, 1, 2, biasStr, text_color=biasColor, text_size=size.small)
+    table.cell(perfTable, 0, 2, "EMA Sep", text_color=color.gray, text_size=size.small)
+    table.cell(perfTable, 1, 2, str.tostring(emaSeparation, "#.##") + "%", text_color=clearTrend ? color.green : color.red, text_size=size.small)
 
     table.cell(perfTable, 0, 3, "Total Trades", text_color=color.gray, text_size=size.small)
     table.cell(perfTable, 1, 3, str.tostring(total), text_color=color.white, text_size=size.small)
@@ -193,11 +198,12 @@ if i_show_table and barstate.islast
     table.cell(perfTable, 0, 8, "SL / TP", text_color=color.gray, text_size=size.small)
     table.cell(perfTable, 1, 8, str.tostring(i_sl_pct, "#.#") + "% / " + str.tostring(tpPct, "#.#") + "%", text_color=color.aqua, text_size=size.small)
 
-    table.cell(perfTable, 0, 9, "Risk:Reward", text_color=color.gray, text_size=size.small)
-    table.cell(perfTable, 1, 9, "1:" + str.tostring(i_tp_rr, "#.#"), text_color=color.aqua, text_size=size.small)
+    table.cell(perfTable, 0, 9, "RSI", text_color=color.gray, text_size=size.small)
+    rsiCol = rsi > i_rsi_ob ? color.red : rsi < i_rsi_os ? color.green : color.white
+    table.cell(perfTable, 1, 9, str.tostring(rsi, "#.#"), text_color=rsiCol, text_size=size.small)
 
     table.cell(perfTable, 0, 10, "Net Profit", text_color=color.gray, text_size=size.small)
-    npColor = netProfit >= 0 ? color.green : color.red
+    npColor = strategy.netprofit >= 0 ? color.green : color.red
     table.cell(perfTable, 1, 10, str.tostring(netProfitPct, "#.#") + "%", text_color=npColor, text_size=size.small)
 
     table.cell(perfTable, 0, 11, "Status", text_color=color.gray, text_size=size.small)
@@ -208,5 +214,5 @@ if i_show_table and barstate.islast
 //=============================================================================
 // ALERTS
 //=============================================================================
-alertcondition(longSignal, title="Long Entry", message="SMC Scalper: Long Signal")
-alertcondition(shortSignal, title="Short Entry", message="SMC Scalper: Short Signal")
+alertcondition(longSignal, title="Long Entry", message="SMC Scalper: HIGH QUALITY Long Signal")
+alertcondition(shortSignal, title="Short Entry", message="SMC Scalper: HIGH QUALITY Short Signal")
