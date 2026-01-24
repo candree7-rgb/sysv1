@@ -10,12 +10,12 @@ strategy("SMC OB Scalper v2", overlay=true, default_qty_type=strategy.cash, defa
 // INPUTS - Risk Management (Margin + Leverage Based)
 //=============================================================================
 grp_risk = "Risk Management"
-i_margin_pct    = input.float(4.0, "Margin % of Equity", minval=1, maxval=20, step=0.5, group=grp_risk, tooltip="How much of equity to use as margin (e.g., 4%)")
-i_sl_loss_pct   = input.float(50.0, "SL Loss % of Position", minval=10, maxval=90, step=5, group=grp_risk, tooltip="At SL, lose this % of position (e.g., 50%). Max equity loss = Margin% × SL Loss%")
+i_margin_pct    = input.float(10.0, "Margin % of Equity", minval=1, maxval=20, step=0.5, group=grp_risk, tooltip="How much of equity to use as margin (e.g., 10%)")
+i_sl_loss_pct   = input.float(20.0, "SL Loss % of Position", minval=10, maxval=90, step=5, group=grp_risk, tooltip="At SL, lose this % of position (e.g., 20%). Max equity loss = Margin% × SL Loss%")
 i_max_leverage  = input.float(50.0, "Max Leverage", minval=5, maxval=125, step=5, group=grp_risk, tooltip="Cap leverage (Bybit max is usually 50-125x)")
 i_direction     = input.string("Both", "Trade Direction", options=["Long", "Short", "Both"], group=grp_risk)
 
-// Calculated: Max equity loss per trade = Margin% × SL Loss% = 4% × 50% = 2%
+// Calculated: Max equity loss per trade = Margin% × SL Loss% = 10% × 20% = 2%
 
 //=============================================================================
 // INPUTS - Strategy Settings (Scalping Optimized)
@@ -119,14 +119,14 @@ inTradingHours() =>
 //=============================================================================
 // POSITION SIZE CALCULATION (Margin + Dynamic Leverage)
 //=============================================================================
-// User sets: Margin % (e.g., 4%) and SL Loss % (e.g., 50%)
+// User sets: Margin % (e.g., 10%) and SL Loss % (e.g., 20%)
 // System calculates: Leverage needed so that SL hit = Margin% × SL Loss% of equity
 //
-// Example: Margin=4%, SL Loss=50%, Equity=$1000
-// - Margin used: $40
-// - Max loss at SL: $40 × 50% = $20 = 2% of equity
-// - If SL is 1% from entry → need 50x leverage
-// - If SL is 2% from entry → need 25x leverage
+// Example: Margin=10%, SL Loss=20%, Equity=$1000
+// - Margin used: $100
+// - Max loss at SL: $100 × 20% = $20 = 2% of equity
+// - If SL is 1% from entry → need 20x leverage (safer than 50x!)
+// - If SL is 2% from entry → need 10x leverage
 
 calcPositionSize(float entry_price, float sl_price) =>
     equity = strategy.equity
