@@ -227,6 +227,16 @@ if not na(iL)
     last_swing_low := low[i_internal_len]
     last_swing_low_bar := bar_index - i_internal_len
 
+// CRITICAL: Reset swing points if they become too old (prevents historical buffer error)
+// Max historical buffer in Pine Script is 300, so we reset at 150 to be safe
+if not na(last_swing_high_bar) and (bar_index - last_swing_high_bar) > 150
+    last_swing_high_bar := na
+    last_swing_high := na
+
+if not na(last_swing_low_bar) and (bar_index - last_swing_low_bar) > 150
+    last_swing_low_bar := na
+    last_swing_low := na
+
 // Detect structure breaks
 bull_break = ta.crossover(close, last_swing_high) and not na(last_swing_high)
 bear_break = ta.crossunder(close, last_swing_low) and not na(last_swing_low)
@@ -255,8 +265,8 @@ var array<float> bear_ob_strength = array.new_float(0)
 // Calculate OB strength - now checks for impulsive move AFTER the OB candle
 calcOBStrength(int ob_idx) =>
     // Check if the move after OB was impulsive (big candle, high volume)
-    // IMPORTANT: Add bounds check to avoid historical buffer error
-    if ob_idx > 0 and ob_idx < 290
+    // IMPORTANT: Add bounds check to avoid historical buffer error (max 145 to be safe)
+    if ob_idx > 0 and ob_idx < 145
         // The candle after OB should be impulsive
         impulse_candle_size = math.abs(close[ob_idx - 1] - open[ob_idx - 1])
         avg_candle_size = ta.sma(math.abs(close - open), 20)
@@ -285,27 +295,29 @@ isBullishCandle(int idx) =>
 //=============================================================================
 
 // Create bullish OB on structure break (price breaks above swing high)
-if bull_break and not na(last_swing_low_bar)
+// CRITICAL: Double-check swing age to prevent historical buffer error
+swing_low_age = na(last_swing_low_bar) ? 9999 : bar_index - last_swing_low_bar
+if bull_break and not na(last_swing_low_bar) and swing_low_age < 150
     // Calculate how many bars ago the swing LOW was formed (that's where the impulse started)
-    bars_since_swing = bar_index - last_swing_low_bar
+    bars_since_swing = swing_low_age
 
-    // IMPORTANT: Cap at 250 to avoid "historical buffer limit" error (max is 300)
+    // IMPORTANT: Cap to avoid "historical buffer limit" error (max is 300)
     // Skip if swing is too old
-    if bars_since_swing > 0 and bars_since_swing < 250
+    if bars_since_swing > 0 and bars_since_swing < 150
         // Find the LAST BEARISH CANDLE before the swing low (this is the real OB!)
         ob_found = false
         ob_idx = 0
 
         // Start from the swing low and look backwards (max 20 bars before swing)
         // The OB is the candle that "loaded up" before the impulse move
-        max_lookback = math.min(bars_since_swing + 20, 280)
+        max_lookback = math.min(bars_since_swing + 20, 140)
         for i = bars_since_swing to max_lookback
-            if i > 0 and i < 290 and isBearishCandle(i) and not ob_found
+            if i > 0 and i < 145 and isBearishCandle(i) and not ob_found
                 ob_idx := i
                 ob_found := true
                 break
 
-        if ob_found and ob_idx > 0 and ob_idx < 290
+        if ob_found and ob_idx > 0 and ob_idx < 145
             // The Order Block is the BODY of the last bearish candle
             ob_top = math.max(open[ob_idx], close[ob_idx])  // Body high (open for bearish)
             ob_btm = low[ob_idx]  // Include the wick for SL
@@ -326,26 +338,28 @@ if bull_break and not na(last_swing_low_bar)
                     array.pop(bull_ob_strength)
 
 // Create bearish OB on structure break (price breaks below swing low)
-if bear_break and not na(last_swing_high_bar)
+// CRITICAL: Double-check swing age to prevent historical buffer error
+swing_high_age = na(last_swing_high_bar) ? 9999 : bar_index - last_swing_high_bar
+if bear_break and not na(last_swing_high_bar) and swing_high_age < 150
     // Calculate how many bars ago the swing HIGH was formed (that's where the impulse started)
-    bars_since_swing = bar_index - last_swing_high_bar
+    bars_since_swing = swing_high_age
 
-    // IMPORTANT: Cap at 250 to avoid "historical buffer limit" error (max is 300)
+    // IMPORTANT: Cap to avoid "historical buffer limit" error (max is 300)
     // Skip if swing is too old
-    if bars_since_swing > 0 and bars_since_swing < 250
+    if bars_since_swing > 0 and bars_since_swing < 150
         // Find the LAST BULLISH CANDLE before the swing high (this is the real OB!)
         ob_found = false
         ob_idx = 0
 
         // Start from the swing high and look backwards (max 20 bars before swing)
-        max_lookback = math.min(bars_since_swing + 20, 280)
+        max_lookback = math.min(bars_since_swing + 20, 140)
         for i = bars_since_swing to max_lookback
-            if i > 0 and i < 290 and isBullishCandle(i) and not ob_found
+            if i > 0 and i < 145 and isBullishCandle(i) and not ob_found
                 ob_idx := i
                 ob_found := true
                 break
 
-        if ob_found and ob_idx > 0 and ob_idx < 290
+        if ob_found and ob_idx > 0 and ob_idx < 145
             // The Order Block is the BODY of the last bullish candle
             ob_top = high[ob_idx]  // Include the wick for SL
             ob_btm = math.min(open[ob_idx], close[ob_idx])  // Body low (open for bullish)
