@@ -1,6 +1,7 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
 // SMC Order Block Scalping Strategy - 5min TF optimized
-// TP1: 1:1 RR (50%), TP2: 1.5:1 RR (50%), SL moves to BE after TP1
+// TP1: 1:1 RR (50% close) = 1% equity, TP2: 1.5:1 RR (50% close) = 1.5% equity
+// Total if both TPs hit: 2.5% equity gain | SL moves to BE after TP1
 // Dynamic Position Sizing: Risk exactly X% per trade
 //@version=6
 strategy("SMC OB Scalper v2", overlay=true, default_qty_type=strategy.cash, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, calc_on_every_tick=false, process_orders_on_close=true, margin_long=5, margin_short=5)
@@ -24,11 +25,11 @@ i_sl_buffer     = input.float(0.05, "SL Buffer %", minval=0.0, maxval=1.0, step=
 i_min_sl_pct    = input.float(0.15, "Min SL Distance %", minval=0.05, maxval=1.0, step=0.05, group=grp_strat, tooltip="Minimum SL distance as % of price - prevents tiny trades")
 i_max_ob_age    = input.int(20, "Max OB Age (bars)", minval=5, maxval=100, group=grp_strat, tooltip="OBs older than this are ignored")
 
-// Take Profit Settings (Fixed RR) - Higher RR for profitability
+// Take Profit Settings (Fixed RR)
 grp_tp = "Take Profit Settings"
-i_tp1_rr        = input.float(1.5, "TP1 Risk:Reward", minval=0.5, maxval=3.0, step=0.1, group=grp_tp, tooltip="TP1 at 1.5:1 RR")
+i_tp1_rr        = input.float(1.0, "TP1 Risk:Reward", minval=0.5, maxval=3.0, step=0.1, group=grp_tp, tooltip="TP1 at 1:1 RR → 1% equity gain (50% of 2% risk)")
 i_tp1_pct       = input.float(50, "TP1 Position %", minval=10, maxval=90, step=10, group=grp_tp, tooltip="Close 50% at TP1")
-i_tp2_rr        = input.float(2.5, "TP2 Risk:Reward", minval=1.0, maxval=5.0, step=0.1, group=grp_tp, tooltip="TP2 at 2.5:1 RR for remaining position")
+i_tp2_rr        = input.float(1.5, "TP2 Risk:Reward", minval=1.0, maxval=5.0, step=0.1, group=grp_tp, tooltip="TP2 at 1.5:1 RR → 1.5% equity gain (50% of 2% risk)")
 i_move_sl_be    = input.bool(true, "Move SL to BE after TP1", group=grp_tp)
 
 //=============================================================================
