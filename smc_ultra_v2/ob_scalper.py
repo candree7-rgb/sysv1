@@ -428,12 +428,18 @@ def run_backtest(
                         t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
                     elif tp_touched:
                         # Extra validation: If TP touched but close is below entry,
-                        # price likely went up then crashed - count as SL if SL was also reachable
-                        if candle['close'] < t.entry_price and candle['low'] <= t.entry_price:
-                            # Price crashed back below entry after touching TP area
-                            # This is suspicious - in reality SL might have been hit
-                            # Only count TP if close confirms profit
-                            pass  # Skip TP, let next candle decide
+                        # the candle was extremely volatile (likely flash crash/wick)
+                        # In reality, you'd likely get stopped out or exit badly
+                        if candle['close'] < t.entry_price:
+                            # Conservative: Exit at the close price (not TP)
+                            # This reflects realistic slippage/panic in volatile conditions
+                            t.exit_price = candle['close']
+                            t.exit_reason = 'volatile'  # New exit reason for tracking
+                        elif candle['low'] <= t.entry_price * 0.99:  # Low dipped >1% below entry
+                            # Suspicious wick - price dipped significantly then recovered
+                            # In reality, you might have been stopped out
+                            t.exit_price = t.entry_price  # Exit at break-even (conservative)
+                            t.exit_reason = 'be'
                         else:
                             t.exit_price = t.tp_price
                             t.exit_reason = 'tp'
@@ -451,11 +457,18 @@ def run_backtest(
                         t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
                     elif tp_touched:
                         # Extra validation: If TP touched but close is above entry,
-                        # price likely went down then bounced - count as SL if SL was also reachable
-                        if candle['close'] > t.entry_price and candle['high'] >= t.entry_price:
-                            # Price bounced back above entry after touching TP area
-                            # This is suspicious - in reality SL might have been hit
-                            pass  # Skip TP, let next candle decide
+                        # the candle was extremely volatile (likely pump/wick)
+                        # In reality, you'd likely get stopped out or exit badly
+                        if candle['close'] > t.entry_price:
+                            # Conservative: Exit at the close price (not TP)
+                            # This reflects realistic slippage/panic in volatile conditions
+                            t.exit_price = candle['close']
+                            t.exit_reason = 'volatile'  # New exit reason for tracking
+                        elif candle['high'] >= t.entry_price * 1.01:  # High spiked >1% above entry
+                            # Suspicious wick - price spiked significantly then dropped
+                            # In reality, you might have been stopped out
+                            t.exit_price = t.entry_price  # Exit at break-even (conservative)
+                            t.exit_reason = 'be'
                         else:
                             t.exit_price = t.tp_price
                             t.exit_reason = 'tp'
