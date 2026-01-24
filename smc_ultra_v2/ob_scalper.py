@@ -403,20 +403,48 @@ def run_backtest(
 
             # === CHECK SL/TP EXITS ===
             if not t.exit_reason:
+                # INTRA-CANDLE LOGIC FIX:
+                # On first candle after entry (bars_in_trade == 1), we don't know
+                # if price went High→Low or Low→High. Use candle direction as heuristic:
+                # - Bullish candle (close > open): likely went Low first, then High
+                # - Bearish candle (close < open): likely went High first, then Low
+                # This prevents false TP hits when entry was caught on the way DOWN
+                # after price already peaked above TP level.
+
+                is_first_candle = (t.bars_in_trade == 1)
+                candle_bullish = candle['close'] > candle['open']
+                candle_bearish = candle['close'] < candle['open']
+
                 if t.direction == 'long':
+                    # Check SL first (conservative)
                     if candle['low'] <= t.current_sl:
                         t.exit_price = t.current_sl
                         t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
                     elif candle['high'] >= t.tp_price:
-                        t.exit_price = t.tp_price
-                        t.exit_reason = 'tp'
-                else:
+                        # On first candle: only count TP if candle is bullish (price went up after entry)
+                        # OR if low is clearly above entry (price never came back down)
+                        if is_first_candle and candle_bearish and candle['low'] < t.entry_price:
+                            # Bearish candle that went below entry = likely hit SL, not TP
+                            # High was probably before entry was touched
+                            pass  # Don't count as TP hit, wait for next candle
+                        else:
+                            t.exit_price = t.tp_price
+                            t.exit_reason = 'tp'
+                else:  # Short
+                    # Check SL first (conservative)
                     if candle['high'] >= t.current_sl:
                         t.exit_price = t.current_sl
                         t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
                     elif candle['low'] <= t.tp_price:
-                        t.exit_price = t.tp_price
-                        t.exit_reason = 'tp'
+                        # On first candle: only count TP if candle is bearish (price went down after entry)
+                        # OR if high is clearly below entry (price never came back up)
+                        if is_first_candle and candle_bullish and candle['high'] > t.entry_price:
+                            # Bullish candle that went above entry = likely hit SL, not TP
+                            # Low was probably before entry was touched
+                            pass  # Don't count as TP hit, wait for next candle
+                        else:
+                            t.exit_price = t.tp_price
+                            t.exit_reason = 'tp'
 
             if t.exit_reason:
                 t.exit_time = ts
