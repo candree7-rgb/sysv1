@@ -1,441 +1,193 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
-// Automated Scalping Signals with TP & SL - SMC Edition
-// FVG + Order Block Detection | MTF Bias Filter | Performance Dashboard
-// Optimized for Crypto Altcoins on 5min-15min charts
+// SMC Scalper Pro - FVG + OB with MTF Bias
 //@version=6
-strategy("SMC Scalper Pro", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, slippage=1, calc_on_every_tick=false, process_orders_on_close=true, margin_long=10, margin_short=10)
+strategy("SMC Scalper Pro", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, slippage=1)
 
 //=============================================================================
-// INPUTS - Timeframe Settings
-//=============================================================================
-grp_tf = "Timeframe Settings"
-i_bias_mult     = input.int(3, "Bias TF Multiplier", minval=2, maxval=10, group=grp_tf, tooltip="Multiplier for higher timeframe bias (e.g., 3 = 15min bias on 5min chart)")
-
-//=============================================================================
-// INPUTS - Bias Settings (MTF EMA Crossover)
+// INPUTS
 //=============================================================================
 grp_bias = "Bias Settings"
-i_ema_fast      = input.int(21, "Fast EMA Period", minval=5, maxval=50, group=grp_bias)
-i_ema_slow      = input.int(50, "Slow EMA Period", minval=20, maxval=200, group=grp_bias)
-i_require_bias  = input.bool(true, "Require Bias Confirmation", group=grp_bias)
+i_bias_mult     = input.int(3, "Bias TF Multiplier", minval=2, maxval=10, group=grp_bias)
+i_ema_fast      = input.int(21, "Fast EMA", minval=5, maxval=50, group=grp_bias)
+i_ema_slow      = input.int(50, "Slow EMA", minval=20, maxval=200, group=grp_bias)
+i_require_bias  = input.bool(false, "Require Bias", group=grp_bias)
 
-//=============================================================================
-// INPUTS - POI Settings
-//=============================================================================
 grp_poi = "POI Settings"
-i_use_fvg       = input.bool(true, "Use Fair Value Gaps (FVG)", group=grp_poi)
-i_use_ob        = input.bool(true, "Use Order Blocks (OB)", group=grp_poi)
-i_swing_len     = input.int(10, "Swing Detection Length", minval=3, maxval=50, group=grp_poi)
-i_max_zones     = input.int(5, "Max Active Zones", minval=1, maxval=20, group=grp_poi)
+i_use_fvg       = input.bool(true, "Use FVG", group=grp_poi)
+i_use_ob        = input.bool(true, "Use OB", group=grp_poi)
 
-//=============================================================================
-// INPUTS - Risk Management
-//=============================================================================
 grp_risk = "Risk Management"
-i_tp_rr         = input.float(1.2, "Take Profit RR", minval=0.5, maxval=5.0, step=0.1, group=grp_risk)
-i_sl_buffer     = input.float(0.1, "SL Buffer %", minval=0.0, maxval=1.0, step=0.05, group=grp_risk)
+i_sl_pct        = input.float(1.0, "SL %", minval=0.1, maxval=5.0, step=0.1, group=grp_risk)
+i_tp_rr         = input.float(1.2, "TP RR", minval=0.5, maxval=5.0, step=0.1, group=grp_risk)
+
+grp_display = "Display"
+i_show_table    = input.bool(true, "Show Table", group=grp_display)
 
 //=============================================================================
-// INPUTS - Display Settings
+// TIMEFRAME
 //=============================================================================
-grp_display = "Display Settings"
-i_show_table    = input.bool(true, "Show Performance Table", group=grp_display)
-i_table_pos     = input.string("Top Right", "Table Position", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left", "Middle Right"], group=grp_display)
-i_show_zones    = input.bool(true, "Show POI Zones", group=grp_display)
-i_bull_color    = input.color(color.new(#00ff00, 70), "Bullish Zone Color", group=grp_display)
-i_bear_color    = input.color(color.new(#ff0000, 70), "Bearish Zone Color", group=grp_display)
+tfMins = timeframe.isminutes ? timeframe.multiplier : timeframe.isdaily ? 1440 : 60
+biasTF = tfMins * i_bias_mult
+biasTFStr = biasTF < 60 ? str.tostring(biasTF) : str.tostring(biasTF/60) + "H"
+currentTFStr = str.tostring(tfMins)
 
 //=============================================================================
-// TIMEFRAME CALCULATIONS
+// MTF BIAS
 //=============================================================================
-tfToMinutes() =>
-    mult = timeframe.multiplier
-    if timeframe.isseconds
-        mult / 60
-    else if timeframe.isminutes
-        mult
-    else if timeframe.isdaily
-        mult * 1440
-    else if timeframe.isweekly
-        mult * 10080
-    else
-        mult
-
-currentTF = tfToMinutes()
-biasTF = currentTF * i_bias_mult
-
-minutesToTF(int mins) =>
-    if mins < 60
-        str.tostring(mins)
-    else if mins < 1440
-        str.tostring(mins / 60) + "H"
-    else
-        str.tostring(mins / 1440) + "D"
-
-biasTFStr = minutesToTF(int(biasTF))
-currentTFStr = minutesToTF(int(currentTF))
+[emaF, emaS] = request.security(syminfo.tickerid, biasTFStr, [ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)])
+bias = emaF > emaS ? 1 : emaF < emaS ? -1 : 0
+biasStr = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
 
 //=============================================================================
-// MTF BIAS DETECTION
+// FVG DETECTION
 //=============================================================================
-[bias_ema_fast, bias_ema_slow] = request.security(syminfo.tickerid, biasTFStr, [ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)], lookahead=barmerge.lookahead_off)
+bullFvg = low > high[2]
+bearFvg = high < low[2]
 
-var string bias_direction = "Sideways"
-if bias_ema_fast > bias_ema_slow * 1.001  // Small buffer to avoid whipsaws
-    bias_direction := "BULLISH"
-else if bias_ema_fast < bias_ema_slow * 0.999
-    bias_direction := "BEARISH"
-else
-    bias_direction := "Sideways"
+var float bFvgTop = na, var float bFvgBtm = na
+var float sFvgTop = na, var float sFvgBtm = na
 
-biasAllowsLong() => not i_require_bias or bias_direction == "BULLISH" or bias_direction == "Sideways"
-biasAllowsShort() => not i_require_bias or bias_direction == "BEARISH" or bias_direction == "Sideways"
+if i_use_fvg and bullFvg
+    bFvgTop := low
+    bFvgBtm := high[2]
 
-//=============================================================================
-// SWING DETECTION
-//=============================================================================
-swingHigh = ta.pivothigh(high, i_swing_len, i_swing_len)
-swingLow = ta.pivotlow(low, i_swing_len, i_swing_len)
-
-var float lastSwingHigh = na
-var float lastSwingLow = na
-var int lastSwingHighBar = na
-var int lastSwingLowBar = na
-
-if not na(swingHigh)
-    lastSwingHigh := high[i_swing_len]
-    lastSwingHighBar := bar_index - i_swing_len
-
-if not na(swingLow)
-    lastSwingLow := low[i_swing_len]
-    lastSwingLowBar := bar_index - i_swing_len
+if i_use_fvg and bearFvg
+    sFvgTop := low[2]
+    sFvgBtm := high
 
 //=============================================================================
-// FVG DETECTION (Simplified)
+// OB DETECTION
 //=============================================================================
-// Bullish FVG: Gap between candle 1 high and candle 3 low (candle 2 is the gap)
-bullFVG = low > high[2] and close[1] > open[1]  // Gap up with bullish middle candle
-bearFVG = high < low[2] and close[1] < open[1]  // Gap down with bearish middle candle
+atr = ta.atr(14)
+bullOb = close > open and (close - open) > atr * 0.3 and close[1] < open[1]
+bearOb = close < open and (open - close) > atr * 0.3 and close[1] > open[1]
 
-// FVG Arrays
-var array<float> bullFvgTop = array.new_float(0)
-var array<float> bullFvgBtm = array.new_float(0)
-var array<int> bullFvgBar = array.new_int(0)
-var array<bool> bullFvgActive = array.new_bool(0)
+var float bObTop = na, var float bObBtm = na
+var float sObTop = na, var float sObBtm = na
 
-var array<float> bearFvgTop = array.new_float(0)
-var array<float> bearFvgBtm = array.new_float(0)
-var array<int> bearFvgBar = array.new_int(0)
-var array<bool> bearFvgActive = array.new_bool(0)
+if i_use_ob and bullOb
+    bObTop := high[1]
+    bObBtm := low[1]
 
-if i_use_fvg and bullFVG
-    array.unshift(bullFvgTop, low)
-    array.unshift(bullFvgBtm, high[2])
-    array.unshift(bullFvgBar, bar_index - 1)
-    array.unshift(bullFvgActive, true)
-    if array.size(bullFvgTop) > i_max_zones
-        array.pop(bullFvgTop)
-        array.pop(bullFvgBtm)
-        array.pop(bullFvgBar)
-        array.pop(bullFvgActive)
-
-if i_use_fvg and bearFVG
-    array.unshift(bearFvgTop, low[2])
-    array.unshift(bearFvgBtm, high)
-    array.unshift(bearFvgBar, bar_index - 1)
-    array.unshift(bearFvgActive, true)
-    if array.size(bearFvgTop) > i_max_zones
-        array.pop(bearFvgTop)
-        array.pop(bearFvgBtm)
-        array.pop(bearFvgBar)
-        array.pop(bearFvgActive)
+if i_use_ob and bearOb
+    sObTop := high[1]
+    sObBtm := low[1]
 
 //=============================================================================
-// ORDER BLOCK DETECTION (Simplified)
+// ENTRY SIGNALS
 //=============================================================================
-// Bullish OB: Last bearish candle before a bullish impulse
-bullishImpulse = close > open and (close - open) > ta.atr(14) * 0.5 and close > high[1]
-bearishImpulse = close < open and (open - close) > ta.atr(14) * 0.5 and close < low[1]
+longFvg = not na(bFvgTop) and low <= bFvgTop and close > bFvgBtm
+longOb = not na(bObTop) and low <= bObTop and close > bObBtm
+longSignal = (longFvg or longOb) and strategy.position_size == 0 and (not i_require_bias or bias >= 0)
 
-// Find last opposite candle before impulse
-bullOB = bullishImpulse and close[1] < open[1]  // Bearish candle before bullish impulse
-bearOB = bearishImpulse and close[1] > open[1]  // Bullish candle before bearish impulse
-
-var array<float> bullObTop = array.new_float(0)
-var array<float> bullObBtm = array.new_float(0)
-var array<int> bullObBar = array.new_int(0)
-var array<bool> bullObActive = array.new_bool(0)
-
-var array<float> bearObTop = array.new_float(0)
-var array<float> bearObBtm = array.new_float(0)
-var array<int> bearObBar = array.new_int(0)
-var array<bool> bearObActive = array.new_bool(0)
-
-if i_use_ob and bullOB
-    array.unshift(bullObTop, high[1])
-    array.unshift(bullObBtm, low[1])
-    array.unshift(bullObBar, bar_index - 1)
-    array.unshift(bullObActive, true)
-    if array.size(bullObTop) > i_max_zones
-        array.pop(bullObTop)
-        array.pop(bullObBtm)
-        array.pop(bullObBar)
-        array.pop(bullObActive)
-
-if i_use_ob and bearOB
-    array.unshift(bearObTop, high[1])
-    array.unshift(bearObBtm, low[1])
-    array.unshift(bearObBar, bar_index - 1)
-    array.unshift(bearObActive, true)
-    if array.size(bearObTop) > i_max_zones
-        array.pop(bearObTop)
-        array.pop(bearObBtm)
-        array.pop(bearObBar)
-        array.pop(bearObActive)
+shortFvg = not na(sFvgTop) and high >= sFvgBtm and close < sFvgTop
+shortOb = not na(sObTop) and high >= sObBtm and close < sObTop
+shortSignal = (shortFvg or shortOb) and strategy.position_size == 0 and (not i_require_bias or bias <= 0)
 
 //=============================================================================
-// ENTRY SIGNAL DETECTION
+// STRATEGY - SIMPLE ATR-BASED TP/SL
 //=============================================================================
-var float entryPrice = na
-var float slPrice = na
-var float tpPrice = na
-var bool isLong = true
-var int usedZoneIdx = -1
-var string usedZoneType = ""
+slAmount = close * (i_sl_pct / 100)
+tpAmount = slAmount * i_tp_rr
 
-longSignal = false
-shortSignal = false
-
-// Check for long entries (price touches bullish zone)
-if strategy.position_size == 0 and biasAllowsLong()
-    // Check bullish FVGs
-    if array.size(bullFvgTop) > 0
-        for i = 0 to math.min(array.size(bullFvgTop) - 1, i_max_zones - 1)
-            if array.get(bullFvgActive, i)
-                top = array.get(bullFvgTop, i)
-                btm = array.get(bullFvgBtm, i)
-                // Price enters zone
-                if low <= top and close >= btm and close <= top * 1.01 and not longSignal
-                    longSignal := true
-                    entryPrice := (top + btm) / 2
-                    slPrice := btm * (1 - i_sl_buffer / 100)
-                    slDist = entryPrice - slPrice
-                    tpPrice := entryPrice + slDist * i_tp_rr
-                    isLong := true
-                    usedZoneIdx := i
-                    usedZoneType := "FVG"
-                    array.set(bullFvgActive, i, false)
-                    break
-
-    // Check bullish OBs
-    if not longSignal and array.size(bullObTop) > 0
-        for i = 0 to math.min(array.size(bullObTop) - 1, i_max_zones - 1)
-            if array.get(bullObActive, i)
-                top = array.get(bullObTop, i)
-                btm = array.get(bullObBtm, i)
-                if low <= top and close >= btm and close <= top * 1.01 and not longSignal
-                    longSignal := true
-                    entryPrice := (top + btm) / 2
-                    slPrice := btm * (1 - i_sl_buffer / 100)
-                    slDist = entryPrice - slPrice
-                    tpPrice := entryPrice + slDist * i_tp_rr
-                    isLong := true
-                    usedZoneIdx := i
-                    usedZoneType := "OB"
-                    array.set(bullObActive, i, false)
-                    break
-
-// Check for short entries (price touches bearish zone)
-if strategy.position_size == 0 and biasAllowsShort()
-    // Check bearish FVGs
-    if array.size(bearFvgTop) > 0
-        for i = 0 to math.min(array.size(bearFvgTop) - 1, i_max_zones - 1)
-            if array.get(bearFvgActive, i)
-                top = array.get(bearFvgTop, i)
-                btm = array.get(bearFvgBtm, i)
-                if high >= btm and close <= top and close >= btm * 0.99 and not shortSignal
-                    shortSignal := true
-                    entryPrice := (top + btm) / 2
-                    slPrice := top * (1 + i_sl_buffer / 100)
-                    slDist = slPrice - entryPrice
-                    tpPrice := entryPrice - slDist * i_tp_rr
-                    isLong := false
-                    usedZoneIdx := i
-                    usedZoneType := "FVG"
-                    array.set(bearFvgActive, i, false)
-                    break
-
-    // Check bearish OBs
-    if not shortSignal and array.size(bearObTop) > 0
-        for i = 0 to math.min(array.size(bearObTop) - 1, i_max_zones - 1)
-            if array.get(bearObActive, i)
-                top = array.get(bearObTop, i)
-                btm = array.get(bearObBtm, i)
-                if high >= btm and close <= top and close >= btm * 0.99 and not shortSignal
-                    shortSignal := true
-                    entryPrice := (top + btm) / 2
-                    slPrice := top * (1 + i_sl_buffer / 100)
-                    slDist = slPrice - entryPrice
-                    tpPrice := entryPrice - slDist * i_tp_rr
-                    isLong := false
-                    usedZoneIdx := i
-                    usedZoneType := "OB"
-                    array.set(bearObActive, i, false)
-                    break
-
-//=============================================================================
-// STRATEGY EXECUTION
-//=============================================================================
 if longSignal
-    strategy.entry("Long", strategy.long)
+    strategy.entry("L", strategy.long)
+    strategy.exit("XL", "L", profit=tpAmount, loss=slAmount)
+    // Clear zone
+    if longFvg
+        bFvgTop := na
+    else
+        bObTop := na
 
 if shortSignal
-    strategy.entry("Short", strategy.short)
-
-// Exit management
-if strategy.position_size > 0 and not na(tpPrice) and not na(slPrice)
-    strategy.exit("Exit L", "Long", limit=tpPrice, stop=slPrice)
-
-if strategy.position_size < 0 and not na(tpPrice) and not na(slPrice)
-    strategy.exit("Exit S", "Short", limit=tpPrice, stop=slPrice)
-
-// Reset on close
-if strategy.position_size == 0 and strategy.position_size[1] != 0
-    entryPrice := na
-    slPrice := na
-    tpPrice := na
+    strategy.entry("S", strategy.short)
+    strategy.exit("XS", "S", profit=tpAmount, loss=slAmount)
+    // Clear zone
+    if shortFvg
+        sFvgTop := na
+    else
+        sObTop := na
 
 //=============================================================================
-// PERFORMANCE METRICS
+// VISUALS
 //=============================================================================
-totalTrades = strategy.closedtrades
-wins = strategy.wintrades
-losses = strategy.losstrades
-winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0.0
-
-grossProfit = strategy.grossprofit
-grossLoss = math.abs(strategy.grossloss)
-profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0.0
-
-// R-Multiple calculations
-avgWin = wins > 0 ? grossProfit / wins : 0.0
-avgLoss = losses > 0 ? grossLoss / losses : 0.0
-avgWinR = avgLoss > 0 ? avgWin / avgLoss : 0.0
-
-totalR = 0.0
-if avgLoss > 0
-    totalR := (grossProfit - grossLoss) / (avgLoss > 0 ? avgLoss : 1)
-
-maxDD = strategy.max_drawdown
-
-//=============================================================================
-// VISUAL - ZONES
-//=============================================================================
-if i_show_zones and barstate.islast
-    // Draw active bullish FVGs
-    for i = 0 to math.min(array.size(bullFvgTop) - 1, 4)
-        if array.get(bullFvgActive, i)
-            top = array.get(bullFvgTop, i)
-            btm = array.get(bullFvgBtm, i)
-            bar = array.get(bullFvgBar, i)
-            box.new(bar, top, bar_index + 10, btm, bgcolor=i_bull_color, border_color=color.green)
-            label.new(bar_index + 5, top, "Bull FVG", color=color.new(color.green, 80), textcolor=color.white, size=size.tiny)
-
-    // Draw active bearish FVGs
-    for i = 0 to math.min(array.size(bearFvgTop) - 1, 4)
-        if array.get(bearFvgActive, i)
-            top = array.get(bearFvgTop, i)
-            btm = array.get(bearFvgBtm, i)
-            bar = array.get(bearFvgBar, i)
-            box.new(bar, top, bar_index + 10, btm, bgcolor=i_bear_color, border_color=color.red)
-            label.new(bar_index + 5, btm, "Bear FVG", color=color.new(color.red, 80), textcolor=color.white, size=size.tiny)
-
-    // Draw active bullish OBs
-    for i = 0 to math.min(array.size(bullObTop) - 1, 4)
-        if array.get(bullObActive, i)
-            top = array.get(bullObTop, i)
-            btm = array.get(bullObBtm, i)
-            bar = array.get(bullObBar, i)
-            box.new(bar, top, bar_index + 10, btm, bgcolor=color.new(color.green, 85), border_color=color.new(color.green, 50))
-            label.new(bar_index + 5, top, "Bull OB", color=color.new(color.green, 80), textcolor=color.white, size=size.tiny)
-
-    // Draw active bearish OBs
-    for i = 0 to math.min(array.size(bearObTop) - 1, 4)
-        if array.get(bearObActive, i)
-            top = array.get(bearObTop, i)
-            btm = array.get(bearObBtm, i)
-            bar = array.get(bearObBar, i)
-            box.new(bar, top, bar_index + 10, btm, bgcolor=color.new(color.red, 85), border_color=color.new(color.red, 50))
-            label.new(bar_index + 5, btm, "Bear OB", color=color.new(color.red, 80), textcolor=color.white, size=size.tiny)
-
-//=============================================================================
-// VISUAL - TRADE LEVELS
-//=============================================================================
-plot(strategy.position_size != 0 ? entryPrice : na, "Entry", color=color.blue, style=plot.style_linebr, linewidth=1)
-plot(strategy.position_size != 0 ? tpPrice : na, "TP", color=color.green, style=plot.style_linebr, linewidth=2)
-plot(strategy.position_size != 0 ? slPrice : na, "SL", color=color.red, style=plot.style_linebr, linewidth=2)
-
 plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
 plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Show TP/SL levels when in position
+var float entryP = na
+var float slP = na
+var float tpP = na
+
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    entryP := strategy.position_avg_price
+    slP := entryP - slAmount
+    tpP := entryP + tpAmount
+
+if strategy.position_size < 0 and strategy.position_size[1] == 0
+    entryP := strategy.position_avg_price
+    slP := entryP + slAmount
+    tpP := entryP - tpAmount
+
+if strategy.position_size == 0
+    entryP := na
+    slP := na
+    tpP := na
+
+plot(entryP, "Entry", color.blue, 1, plot.style_linebr)
+plot(tpP, "TP", color.green, 2, plot.style_linebr)
+plot(slP, "SL", color.red, 2, plot.style_linebr)
 
 //=============================================================================
 // PERFORMANCE TABLE
 //=============================================================================
-if i_show_table
-    tablePos = switch i_table_pos
-        "Top Right" => position.top_right
-        "Top Left" => position.top_left
-        "Bottom Right" => position.bottom_right
-        "Bottom Left" => position.bottom_left
-        "Middle Right" => position.middle_right
-        => position.top_right
+if i_show_table and barstate.islast
+    var table t = table.new(position.top_right, 2, 11, color.new(color.black, 20), border_color=color.gray, border_width=1)
 
-    var table perfTable = table.new(tablePos, 2, 12, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+    wins = strategy.wintrades
+    losses = strategy.losstrades
+    total = strategy.closedtrades
+    wr = total > 0 ? wins/total*100 : 0
+    pf = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0
+    dd = strategy.max_drawdown / strategy.initial_capital * 100
+    np = strategy.netprofit
+    npPct = np / strategy.initial_capital * 100
 
-    if barstate.islast
-        table.cell(perfTable, 0, 0, "PERFORMANCE METRICS", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 60))
-        table.cell(perfTable, 1, 0, "VALUES", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 60))
+    table.cell(t, 0, 0, "METRICS", text_color=color.white, bgcolor=color.gray)
+    table.cell(t, 1, 0, "VALUES", text_color=color.white, bgcolor=color.gray)
 
-        table.cell(perfTable, 0, 1, "Bias TF / POI TF", text_color=color.gray, text_size=size.small)
-        table.cell(perfTable, 1, 1, biasTFStr + " / " + currentTFStr, text_color=color.aqua, text_size=size.small)
+    table.cell(t, 0, 1, "Bias TF / Chart", text_color=color.gray)
+    table.cell(t, 1, 1, biasTFStr + " / " + currentTFStr, text_color=color.aqua)
 
-        table.cell(perfTable, 0, 2, "Bias Direction", text_color=color.gray, text_size=size.small)
-        biasCol = bias_direction == "BULLISH" ? color.green : bias_direction == "BEARISH" ? color.red : color.gray
-        table.cell(perfTable, 1, 2, bias_direction, text_color=biasCol, text_size=size.small)
+    table.cell(t, 0, 2, "Bias", text_color=color.gray)
+    table.cell(t, 1, 2, biasStr, text_color=bias==1?color.green:bias==-1?color.red:color.gray)
 
-        table.cell(perfTable, 0, 3, "Data Processing", text_color=color.gray, text_size=size.small)
-        table.cell(perfTable, 1, 3, str.tostring(bar_index) + " bars", text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 3, "Trades", text_color=color.gray)
+    table.cell(t, 1, 3, str.tostring(total), text_color=color.white)
 
-        activeText = strategy.position_size != 0 ? " (+1 Active)" : ""
-        table.cell(perfTable, 0, 4, "Total Trades", text_color=color.gray, text_size=size.small)
-        table.cell(perfTable, 1, 4, str.tostring(totalTrades) + activeText, text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 4, "W / L", text_color=color.gray)
+    table.cell(t, 1, 4, str.tostring(wins) + " / " + str.tostring(losses), text_color=color.white)
 
-        table.cell(perfTable, 0, 5, "Wins / Losses", text_color=color.gray, text_size=size.small)
-        table.cell(perfTable, 1, 5, str.tostring(wins) + " / " + str.tostring(losses), text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 5, "Win Rate", text_color=color.gray)
+    table.cell(t, 1, 5, str.tostring(wr, "#.#") + "%", text_color=wr>=55?color.green:wr>=45?color.yellow:color.red)
 
-        table.cell(perfTable, 0, 6, "Win Rate", text_color=color.gray, text_size=size.small)
-        wrCol = winRate >= 55 ? color.green : winRate >= 45 ? color.yellow : color.red
-        table.cell(perfTable, 1, 6, str.tostring(winRate, "#.#") + "%", text_color=wrCol, text_size=size.small)
+    table.cell(t, 0, 6, "Profit Factor", text_color=color.gray)
+    table.cell(t, 1, 6, str.tostring(pf, "#.##"), text_color=pf>=1.5?color.green:pf>=1?color.yellow:color.red)
 
-        table.cell(perfTable, 0, 7, "Total R-Multiple", text_color=color.gray, text_size=size.small)
-        rCol = totalR >= 0 ? color.green : color.red
-        table.cell(perfTable, 1, 7, str.tostring(totalR, "#.#") + "R", text_color=rCol, text_size=size.small)
+    table.cell(t, 0, 7, "Max DD", text_color=color.gray)
+    table.cell(t, 1, 7, str.tostring(dd, "#.#") + "%", text_color=color.red)
 
-        table.cell(perfTable, 0, 8, "Avg R Win / Loss", text_color=color.gray, text_size=size.small)
-        table.cell(perfTable, 1, 8, str.tostring(avgWinR, "#.#") + " / 1.0", text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 8, "SL / TP", text_color=color.gray)
+    table.cell(t, 1, 8, str.tostring(i_sl_pct,"#.#") + "% / " + str.tostring(i_sl_pct*i_tp_rr,"#.#") + "%", text_color=color.aqua)
 
-        table.cell(perfTable, 0, 9, "TP Ratio", text_color=color.gray, text_size=size.small)
-        table.cell(perfTable, 1, 9, str.tostring(i_tp_rr, "#.#") + ":1", text_color=color.aqua, text_size=size.small)
+    table.cell(t, 0, 9, "Net Profit", text_color=color.gray)
+    table.cell(t, 1, 9, str.tostring(npPct, "#.#") + "%", text_color=np>=0?color.green:color.red)
 
-        table.cell(perfTable, 0, 10, "Profit Factor", text_color=color.gray, text_size=size.small)
-        pfCol = profitFactor >= 1.5 ? color.green : profitFactor >= 1.0 ? color.yellow : color.red
-        table.cell(perfTable, 1, 10, str.tostring(profitFactor, "#.##"), text_color=pfCol, text_size=size.small)
-
-        table.cell(perfTable, 0, 11, "Max Drawdown", text_color=color.gray, text_size=size.small)
-        table.cell(perfTable, 1, 11, str.tostring(maxDD / strategy.initial_capital * 100, "#.#") + "%", text_color=color.red, text_size=size.small)
+    table.cell(t, 0, 10, "Bars", text_color=color.gray)
+    table.cell(t, 1, 10, str.tostring(bar_index), text_color=color.white)
 
 //=============================================================================
 // ALERTS
 //=============================================================================
-alertcondition(longSignal, "Long Entry", "SMC Scalper: LONG on {{ticker}}")
-alertcondition(shortSignal, "Short Entry", "SMC Scalper: SHORT on {{ticker}}")
+alertcondition(longSignal, "Long", "LONG {{ticker}}")
+alertcondition(shortSignal, "Short", "SHORT {{ticker}}")
