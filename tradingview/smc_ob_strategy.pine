@@ -1,0 +1,463 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// Strategy based on LuxAlgo Order Blocks + Custom MTF Logic
+// Converted to Pine Script v6 Strategy for accurate backtesting
+//@version=6
+strategy("SMC Order Block Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=2, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06)
+
+//=============================================================================
+// INPUTS - Strategy Settings
+//=============================================================================
+grp_strat = "Strategy Settings"
+i_direction     = input.string("Both", "Trade Direction", options=["Long", "Short", "Both"], group=grp_strat)
+i_risk_pct      = input.float(2.0, "Risk % per Trade", minval=0.1, maxval=10, step=0.1, group=grp_strat)
+i_rr_ratio      = input.float(2.0, "Risk:Reward Ratio", minval=1.0, maxval=5.0, step=0.5, group=grp_strat)
+i_sl_buffer     = input.float(0.5, "SL Buffer %", minval=0.0, maxval=2.0, step=0.1, group=grp_strat, tooltip="Extra buffer below/above OB for SL")
+i_max_ob_age    = input.int(30, "Max OB Age (bars)", minval=5, maxval=100, group=grp_strat)
+
+// Partial TP Settings
+grp_partial = "Partial Take Profit"
+i_use_partial   = input.bool(true, "Use Partial TP", group=grp_partial)
+i_partial_pct   = input.float(50, "Partial TP Size %", minval=10, maxval=90, step=10, group=grp_partial)
+i_partial_level = input.float(50, "Partial TP at % of Full TP", minval=25, maxval=75, step=5, group=grp_partial)
+i_move_sl_be    = input.bool(true, "Move SL to BE after Partial", group=grp_partial)
+
+//=============================================================================
+// INPUTS - Order Block Settings
+//=============================================================================
+grp_ob = "Order Block Settings"
+i_ob_show       = input.bool(true, "Show Order Blocks", group=grp_ob)
+i_ob_num        = input.int(3, "Max Order Blocks", minval=1, maxval=10, group=grp_ob)
+i_ob_strength   = input.float(0.8, "Min OB Strength", minval=0.5, maxval=1.0, step=0.05, group=grp_ob, tooltip="Higher = stronger OBs only")
+i_ob_mitigation = input.string("Close", "Mitigation Method", options=["Touch", "Wick", "Close"], group=grp_ob)
+i_internal_len  = input.int(5, "Internal Structure Length", minval=2, maxval=20, group=grp_ob)
+
+// OB Colors
+i_ob_bull_css   = input.color(color.new(#089981, 80), "Bullish OB Color", group=grp_ob)
+i_ob_bear_css   = input.color(color.new(#f23645, 80), "Bearish OB Color", group=grp_ob)
+
+//=============================================================================
+// INPUTS - MTF (Multi-Timeframe) Filter
+//=============================================================================
+grp_mtf = "MTF Trend Filter"
+i_use_1h_mtf    = input.bool(true, "Use 1H Trend Filter", group=grp_mtf)
+i_use_4h_mtf    = input.bool(false, "Use 4H Trend Filter", group=grp_mtf)
+i_use_daily_mtf = input.bool(false, "Use Daily Trend Filter", group=grp_mtf)
+i_ema_fast      = input.int(20, "Fast EMA", minval=5, maxval=50, group=grp_mtf)
+i_ema_slow      = input.int(50, "Slow EMA", minval=20, maxval=200, group=grp_mtf)
+
+//=============================================================================
+// INPUTS - External Indicator Filters (Connect your own indicators!)
+//=============================================================================
+grp_ext = "External Indicator Filters"
+i_use_ext1      = input.bool(false, "Use External Filter 1", group=grp_ext)
+i_ext1_source   = input.source(close, "Ext 1 Source", group=grp_ext)
+i_ext1_compare  = input.string("Greater Than", "Ext 1 Condition", options=["Greater Than", "Less Than", "Equals", "Crosses Above", "Crosses Below"], group=grp_ext)
+i_ext1_value    = input.float(0, "Ext 1 Value", group=grp_ext)
+
+i_use_ext2      = input.bool(false, "Use External Filter 2", group=grp_ext)
+i_ext2_source   = input.source(close, "Ext 2 Source", group=grp_ext)
+i_ext2_compare  = input.string("Greater Than", "Ext 2 Condition", options=["Greater Than", "Less Than", "Equals", "Crosses Above", "Crosses Below"], group=grp_ext)
+i_ext2_value    = input.float(0, "Ext 2 Value", group=grp_ext)
+
+i_use_ext3      = input.bool(false, "Use External Filter 3", group=grp_ext)
+i_ext3_source   = input.source(close, "Ext 3 Source", group=grp_ext)
+i_ext3_compare  = input.string("Greater Than", "Ext 3 Condition", options=["Greater Than", "Less Than", "Equals", "Crosses Above", "Crosses Below"], group=grp_ext)
+i_ext3_value    = input.float(0, "Ext 3 Value", group=grp_ext)
+
+//=============================================================================
+// INPUTS - Time Filter
+//=============================================================================
+grp_time = "Time Filter"
+i_use_time      = input.bool(false, "Use Time Filter", group=grp_time)
+i_start_hour    = input.int(8, "Start Hour (UTC)", minval=0, maxval=23, group=grp_time)
+i_end_hour      = input.int(20, "End Hour (UTC)", minval=0, maxval=23, group=grp_time)
+
+//=============================================================================
+// HELPER FUNCTIONS
+//=============================================================================
+
+// External condition checker
+checkExtCondition(float src, string cond, float val) =>
+    result = true
+    if cond == "Greater Than"
+        result := src > val
+    else if cond == "Less Than"
+        result := src < val
+    else if cond == "Equals"
+        result := math.abs(src - val) < 0.0001
+    else if cond == "Crosses Above"
+        result := ta.crossover(src, val)
+    else if cond == "Crosses Below"
+        result := ta.crossunder(src, val)
+    result
+
+// Check all external filters
+checkExternalFilters() =>
+    ext1_ok = i_use_ext1 ? checkExtCondition(i_ext1_source, i_ext1_compare, i_ext1_value) : true
+    ext2_ok = i_use_ext2 ? checkExtCondition(i_ext2_source, i_ext2_compare, i_ext2_value) : true
+    ext3_ok = i_use_ext3 ? checkExtCondition(i_ext3_source, i_ext3_compare, i_ext3_value) : true
+    ext1_ok and ext2_ok and ext3_ok
+
+// Time filter
+inTradingHours() =>
+    if i_use_time
+        hour >= i_start_hour and hour < i_end_hour
+    else
+        true
+
+//=============================================================================
+// MTF TREND DETECTION
+//=============================================================================
+
+// Current timeframe EMAs
+ema_fast = ta.ema(close, i_ema_fast)
+ema_slow = ta.ema(close, i_ema_slow)
+
+// 1H Trend
+[h1_close, h1_ema20, h1_ema50] = request.security(syminfo.tickerid, "60", [close, ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)], lookahead=barmerge.lookahead_off)
+h1_bullish = h1_close > h1_ema20 and h1_ema20 > h1_ema50
+h1_bearish = h1_close < h1_ema20 and h1_ema20 < h1_ema50
+
+// 4H Trend
+[h4_close, h4_ema20, h4_ema50] = request.security(syminfo.tickerid, "240", [close, ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)], lookahead=barmerge.lookahead_off)
+h4_bullish = h4_close > h4_ema20 and h4_ema20 > h4_ema50
+h4_bearish = h4_close < h4_ema20 and h4_ema20 < h4_ema50
+
+// Daily Trend
+[d_close, d_ema20, d_ema50] = request.security(syminfo.tickerid, "D", [close, ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)], lookahead=barmerge.lookahead_off)
+d_bullish = d_close > d_ema20 and d_ema20 > d_ema50
+d_bearish = d_close < d_ema20 and d_ema20 < d_ema50
+
+// Combined MTF Filter
+mtf_long_ok() =>
+    h1_ok = i_use_1h_mtf ? h1_bullish : true
+    h4_ok = i_use_4h_mtf ? h4_bullish : true
+    d_ok  = i_use_daily_mtf ? d_bullish : true
+    h1_ok and h4_ok and d_ok
+
+mtf_short_ok() =>
+    h1_ok = i_use_1h_mtf ? h1_bearish : true
+    h4_ok = i_use_4h_mtf ? h4_bearish : true
+    d_ok  = i_use_daily_mtf ? d_bearish : true
+    h1_ok and h4_ok and d_ok
+
+//=============================================================================
+// ORDER BLOCK DETECTION (Simplified from LuxAlgo)
+//=============================================================================
+
+// Swing detection
+iH = ta.pivothigh(high, i_internal_len, i_internal_len)
+iL = ta.pivotlow(low, i_internal_len, i_internal_len)
+
+// Track internal structure
+var int itrend = 0
+var float last_swing_high = na
+var float last_swing_low = na
+var int last_swing_high_bar = na
+var int last_swing_low_bar = na
+
+// Update swing points
+if not na(iH)
+    last_swing_high := high[i_internal_len]
+    last_swing_high_bar := bar_index - i_internal_len
+
+if not na(iL)
+    last_swing_low := low[i_internal_len]
+    last_swing_low_bar := bar_index - i_internal_len
+
+// Detect structure breaks
+bull_break = ta.crossover(close, last_swing_high) and not na(last_swing_high)
+bear_break = ta.crossunder(close, last_swing_low) and not na(last_swing_low)
+
+// Update trend
+if bull_break
+    itrend := 1
+if bear_break
+    itrend := -1
+
+//=============================================================================
+// ORDER BLOCK STORAGE
+//=============================================================================
+
+// Order Block arrays
+var array<float> bull_ob_top = array.new_float(0)
+var array<float> bull_ob_btm = array.new_float(0)
+var array<int> bull_ob_bar = array.new_int(0)
+var array<float> bull_ob_strength = array.new_float(0)
+
+var array<float> bear_ob_top = array.new_float(0)
+var array<float> bear_ob_btm = array.new_float(0)
+var array<int> bear_ob_bar = array.new_int(0)
+var array<float> bear_ob_strength = array.new_float(0)
+
+// Calculate OB strength based on volume and move
+calcOBStrength(int lookback) =>
+    vol_ratio = volume / ta.sma(volume, 20)
+    move_pct = math.abs(close - open) / open * 100
+    strength = math.min(1.0, (vol_ratio * 0.5 + move_pct * 0.1))
+    strength
+
+// Create bullish OB on structure break
+if bull_break and not na(last_swing_low_bar)
+    // Find the lowest candle between last swing low and break
+    lowest_idx = 0
+    lowest_val = low
+    for i = 1 to math.min(bar_index - last_swing_low_bar, 50)
+        if low[i] < lowest_val
+            lowest_val := low[i]
+            lowest_idx := i
+
+    ob_top = math.max(open[lowest_idx], close[lowest_idx])
+    ob_btm = low[lowest_idx]
+    ob_str = calcOBStrength(lowest_idx)
+
+    if ob_str >= i_ob_strength
+        array.unshift(bull_ob_top, ob_top)
+        array.unshift(bull_ob_btm, ob_btm)
+        array.unshift(bull_ob_bar, bar_index - lowest_idx)
+        array.unshift(bull_ob_strength, ob_str)
+
+        // Limit array size
+        if array.size(bull_ob_top) > i_ob_num
+            array.pop(bull_ob_top)
+            array.pop(bull_ob_btm)
+            array.pop(bull_ob_bar)
+            array.pop(bull_ob_strength)
+
+// Create bearish OB on structure break
+if bear_break and not na(last_swing_high_bar)
+    // Find the highest candle between last swing high and break
+    highest_idx = 0
+    highest_val = high
+    for i = 1 to math.min(bar_index - last_swing_high_bar, 50)
+        if high[i] > highest_val
+            highest_val := high[i]
+            highest_idx := i
+
+    ob_top = high[highest_idx]
+    ob_btm = math.min(open[highest_idx], close[highest_idx])
+    ob_str = calcOBStrength(highest_idx)
+
+    if ob_str >= i_ob_strength
+        array.unshift(bear_ob_top, ob_top)
+        array.unshift(bear_ob_btm, ob_btm)
+        array.unshift(bear_ob_bar, bar_index - highest_idx)
+        array.unshift(bear_ob_strength, ob_str)
+
+        // Limit array size
+        if array.size(bear_ob_top) > i_ob_num
+            array.pop(bear_ob_top)
+            array.pop(bear_ob_btm)
+            array.pop(bear_ob_bar)
+            array.pop(bear_ob_strength)
+
+//=============================================================================
+// ORDER BLOCK MITIGATION & ENTRY SIGNALS
+//=============================================================================
+
+// Check for bullish OB entry (price touches bullish OB from above)
+var int active_bull_ob_idx = -1
+var float bull_entry = na
+var float bull_sl = na
+var float bull_tp = na
+
+bull_ob_signal = false
+if array.size(bull_ob_top) > 0 and strategy.position_size == 0
+    for i = 0 to array.size(bull_ob_top) - 1
+        ob_top = array.get(bull_ob_top, i)
+        ob_btm = array.get(bull_ob_btm, i)
+        ob_bar = array.get(bull_ob_bar, i)
+        ob_age = bar_index - ob_bar
+
+        // Check if price is touching OB and OB is not too old
+        price_in_ob = low <= ob_top and close > ob_btm
+        ob_valid = ob_age <= i_max_ob_age
+
+        if price_in_ob and ob_valid and not bull_ob_signal
+            // Check mitigation method
+            entry_trigger = false
+            if i_ob_mitigation == "Touch"
+                entry_trigger := low <= ob_top
+            else if i_ob_mitigation == "Wick"
+                entry_trigger := low <= ob_top and close > ob_top
+            else if i_ob_mitigation == "Close"
+                entry_trigger := close <= ob_top and close >= ob_btm
+
+            if entry_trigger
+                bull_ob_signal := true
+                active_bull_ob_idx := i
+                bull_entry := ob_top
+                bull_sl := ob_btm * (1 - i_sl_buffer/100)
+                sl_dist = bull_entry - bull_sl
+                bull_tp := bull_entry + (sl_dist * i_rr_ratio)
+                break
+
+// Check for bearish OB entry (price touches bearish OB from below)
+var int active_bear_ob_idx = -1
+var float bear_entry = na
+var float bear_sl = na
+var float bear_tp = na
+
+bear_ob_signal = false
+if array.size(bear_ob_top) > 0 and strategy.position_size == 0
+    for i = 0 to array.size(bear_ob_top) - 1
+        ob_top = array.get(bear_ob_top, i)
+        ob_btm = array.get(bear_ob_btm, i)
+        ob_bar = array.get(bear_ob_bar, i)
+        ob_age = bar_index - ob_bar
+
+        // Check if price is touching OB and OB is not too old
+        price_in_ob = high >= ob_btm and close < ob_top
+        ob_valid = ob_age <= i_max_ob_age
+
+        if price_in_ob and ob_valid and not bear_ob_signal
+            // Check mitigation method
+            entry_trigger = false
+            if i_ob_mitigation == "Touch"
+                entry_trigger := high >= ob_btm
+            else if i_ob_mitigation == "Wick"
+                entry_trigger := high >= ob_btm and close < ob_btm
+            else if i_ob_mitigation == "Close"
+                entry_trigger := close >= ob_btm and close <= ob_top
+
+            if entry_trigger
+                bear_ob_signal := true
+                active_bear_ob_idx := i
+                bear_entry := ob_btm
+                bear_sl := ob_top * (1 + i_sl_buffer/100)
+                sl_dist = bear_sl - bear_entry
+                bear_tp := bear_entry - (sl_dist * i_rr_ratio)
+                break
+
+//=============================================================================
+// ENTRY CONDITIONS
+//=============================================================================
+
+// Final long condition
+long_condition = bull_ob_signal and
+                 (i_direction == "Long" or i_direction == "Both") and
+                 mtf_long_ok() and
+                 checkExternalFilters() and
+                 inTradingHours() and
+                 strategy.position_size == 0
+
+// Final short condition
+short_condition = bear_ob_signal and
+                  (i_direction == "Short" or i_direction == "Both") and
+                  mtf_short_ok() and
+                  checkExternalFilters() and
+                  inTradingHours() and
+                  strategy.position_size == 0
+
+//=============================================================================
+// STRATEGY EXECUTION
+//=============================================================================
+
+// Track partial TP
+var bool partial_taken = false
+var float entry_price = na
+
+if long_condition
+    strategy.entry("Long", strategy.long)
+    entry_price := close
+    partial_taken := false
+
+    // Remove used OB
+    if active_bull_ob_idx >= 0 and active_bull_ob_idx < array.size(bull_ob_top)
+        array.remove(bull_ob_top, active_bull_ob_idx)
+        array.remove(bull_ob_btm, active_bull_ob_idx)
+        array.remove(bull_ob_bar, active_bull_ob_idx)
+        array.remove(bull_ob_strength, active_bull_ob_idx)
+
+if short_condition
+    strategy.entry("Short", strategy.short)
+    entry_price := close
+    partial_taken := false
+
+    // Remove used OB
+    if active_bear_ob_idx >= 0 and active_bear_ob_idx < array.size(bear_ob_top)
+        array.remove(bear_ob_top, active_bear_ob_idx)
+        array.remove(bear_ob_btm, active_bear_ob_idx)
+        array.remove(bear_ob_bar, active_bear_ob_idx)
+        array.remove(bear_ob_strength, active_bear_ob_idx)
+
+// Exit logic with partial TP
+if strategy.position_size > 0  // Long position
+    current_sl = bull_sl
+
+    // Partial TP
+    if i_use_partial and not partial_taken
+        partial_tp_price = entry_price + (bull_tp - entry_price) * (i_partial_level / 100)
+        if high >= partial_tp_price
+            strategy.close("Long", qty_percent=i_partial_pct, comment="Partial TP")
+            partial_taken := true
+            if i_move_sl_be
+                current_sl := entry_price * 1.001  // Move SL to BE + 0.1%
+
+    strategy.exit("Long Exit", "Long", stop=current_sl, limit=bull_tp)
+
+if strategy.position_size < 0  // Short position
+    current_sl = bear_sl
+
+    // Partial TP
+    if i_use_partial and not partial_taken
+        partial_tp_price = entry_price - (entry_price - bear_tp) * (i_partial_level / 100)
+        if low <= partial_tp_price
+            strategy.close("Short", qty_percent=i_partial_pct, comment="Partial TP")
+            partial_taken := true
+            if i_move_sl_be
+                current_sl := entry_price * 0.999  // Move SL to BE - 0.1%
+
+    strategy.exit("Short Exit", "Short", stop=current_sl, limit=bear_tp)
+
+//=============================================================================
+// VISUALS - Order Block Boxes
+//=============================================================================
+
+// Draw bullish OBs
+if i_ob_show and barstate.islast
+    for i = 0 to math.min(array.size(bull_ob_top) - 1, i_ob_num - 1)
+        ob_top = array.get(bull_ob_top, i)
+        ob_btm = array.get(bull_ob_btm, i)
+        ob_bar = array.get(bull_ob_bar, i)
+
+        box.new(ob_bar, ob_top, bar_index + 10, ob_btm,
+                border_color=color.new(#089981, 50),
+                bgcolor=i_ob_bull_css,
+                xloc=xloc.bar_index)
+
+// Draw bearish OBs
+if i_ob_show and barstate.islast
+    for i = 0 to math.min(array.size(bear_ob_top) - 1, i_ob_num - 1)
+        ob_top = array.get(bear_ob_top, i)
+        ob_btm = array.get(bear_ob_btm, i)
+        ob_bar = array.get(bear_ob_bar, i)
+
+        box.new(ob_bar, ob_top, bar_index + 10, ob_btm,
+                border_color=color.new(#f23645, 50),
+                bgcolor=i_ob_bear_css,
+                xloc=xloc.bar_index)
+
+//=============================================================================
+// PLOTS
+//=============================================================================
+
+// MTF Trend Background
+bgcolor(i_use_1h_mtf ? (h1_bullish ? color.new(#089981, 95) : h1_bearish ? color.new(#f23645, 95) : na) : na)
+
+// Entry signals
+plotshape(long_condition, title="Long Signal", location=location.belowbar, color=#089981, style=shape.triangleup, size=size.small)
+plotshape(short_condition, title="Short Signal", location=location.abovebar, color=#f23645, style=shape.triangledown, size=size.small)
+
+// EMAs
+plot(ema_fast, "EMA Fast", color=color.new(#2962FF, 50), linewidth=1)
+plot(ema_slow, "EMA Slow", color=color.new(#FF6D00, 50), linewidth=1)
+
+//=============================================================================
+// ALERTS
+//=============================================================================
+
+alertcondition(long_condition, title="Long Entry", message="SMC OB Strategy: Long Entry Signal")
+alertcondition(short_condition, title="Short Entry", message="SMC OB Strategy: Short Entry Signal")
+alertcondition(bull_break, title="Bullish Structure Break", message="Bullish structure break detected")
+alertcondition(bear_break, title="Bearish Structure Break", message="Bearish structure break detected")
