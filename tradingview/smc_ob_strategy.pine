@@ -20,11 +20,11 @@ grp_strat = "Strategy Settings"
 i_sl_buffer     = input.float(0.05, "SL Buffer %", minval=0.0, maxval=1.0, step=0.01, group=grp_strat, tooltip="Buffer below OB for Long SL, above OB for Short SL")
 i_max_ob_age    = input.int(20, "Max OB Age (bars)", minval=5, maxval=100, group=grp_strat, tooltip="OBs older than this are ignored")
 
-// Take Profit Settings (Fixed RR)
+// Take Profit Settings (Fixed RR) - Higher RR for profitability
 grp_tp = "Take Profit Settings"
-i_tp1_rr        = input.float(1.0, "TP1 Risk:Reward", minval=0.5, maxval=3.0, step=0.1, group=grp_tp, tooltip="TP1 at 1:1 RR")
+i_tp1_rr        = input.float(1.5, "TP1 Risk:Reward", minval=0.5, maxval=3.0, step=0.1, group=grp_tp, tooltip="TP1 at 1.5:1 RR")
 i_tp1_pct       = input.float(50, "TP1 Position %", minval=10, maxval=90, step=10, group=grp_tp, tooltip="Close 50% at TP1")
-i_tp2_rr        = input.float(1.5, "TP2 Risk:Reward", minval=1.0, maxval=5.0, step=0.1, group=grp_tp, tooltip="TP2 at 1.5:1 RR for remaining position")
+i_tp2_rr        = input.float(2.5, "TP2 Risk:Reward", minval=1.0, maxval=5.0, step=0.1, group=grp_tp, tooltip="TP2 at 2.5:1 RR for remaining position")
 i_move_sl_be    = input.bool(true, "Move SL to BE after TP1", group=grp_tp)
 
 //=============================================================================
@@ -229,36 +229,59 @@ var array<float> bear_ob_btm = array.new_float(0)
 var array<int> bear_ob_bar = array.new_int(0)
 var array<float> bear_ob_strength = array.new_float(0)
 
-// Calculate OB strength based on volume and move
-calcOBStrength(int lookback) =>
-    vol_ratio = volume / ta.sma(volume, 20)
-    move_pct = math.abs(close - open) / open * 100
-    strength = math.min(1.0, (vol_ratio * 0.5 + move_pct * 0.1))
-    strength
+// Calculate OB strength - now checks for impulsive move AFTER the OB candle
+calcOBStrength(int ob_idx) =>
+    // Check if the move after OB was impulsive (big candle, high volume)
+    if ob_idx > 0
+        // The candle after OB should be impulsive
+        impulse_candle_size = math.abs(close[ob_idx - 1] - open[ob_idx - 1])
+        avg_candle_size = ta.sma(math.abs(close - open), 20)
+        vol_ratio = volume[ob_idx - 1] / ta.sma(volume, 20)
+
+        // Impulse should be at least 1.5x average size
+        size_ratio = impulse_candle_size / avg_candle_size
+        strength = math.min(1.0, (size_ratio * 0.4 + vol_ratio * 0.3))
+        strength
+    else
+        0.0
+
+// Check if candle is bearish (for bullish OB)
+isBearishCandle(int idx) =>
+    close[idx] < open[idx]
+
+// Check if candle is bullish (for bearish OB)
+isBullishCandle(int idx) =>
+    close[idx] > open[idx]
+
+//=============================================================================
+// CORRECT ORDER BLOCK DETECTION
+// Bullish OB = Last BEARISH candle before impulsive UP move
+// Bearish OB = Last BULLISH candle before impulsive DOWN move
+//=============================================================================
 
 // Create bullish OB on structure break
-if bull_break and not na(last_swing_low_bar)
-    // Calculate lookback distance (capped at 50, min 1, within buffer limit of 300)
-    bars_since_swing = bar_index - last_swing_low_bar
-    max_lookback = math.min(math.max(bars_since_swing, 1), 50)
+if bull_break
+    // Find the LAST BEARISH CANDLE before the break (this is the real OB!)
+    ob_found = false
+    ob_idx = 0
 
-    // Only proceed if within valid range
-    if max_lookback > 0 and max_lookback <= 50
-        lowest_idx = 0
-        lowest_val = low
-        for i = 1 to max_lookback
-            if low[i] < lowest_val
-                lowest_val := low[i]
-                lowest_idx := i
+    // Look back to find the last bearish candle (max 20 bars)
+    for i = 1 to 20
+        if isBearishCandle(i) and not ob_found
+            ob_idx := i
+            ob_found := true
+            break
 
-        ob_top = math.max(open[lowest_idx], close[lowest_idx])
-        ob_btm = low[lowest_idx]
-        ob_str = calcOBStrength(lowest_idx)
+    if ob_found and ob_idx > 0
+        // The Order Block is the BODY of the last bearish candle
+        ob_top = math.max(open[ob_idx], close[ob_idx])  // Body high (open for bearish)
+        ob_btm = low[ob_idx]  // Include the wick for SL
+        ob_str = calcOBStrength(ob_idx)
 
         if ob_str >= i_ob_strength
             array.unshift(bull_ob_top, ob_top)
             array.unshift(bull_ob_btm, ob_btm)
-            array.unshift(bull_ob_bar, bar_index - lowest_idx)
+            array.unshift(bull_ob_bar, bar_index - ob_idx)
             array.unshift(bull_ob_strength, ob_str)
 
             // Limit array size
@@ -269,28 +292,28 @@ if bull_break and not na(last_swing_low_bar)
                 array.pop(bull_ob_strength)
 
 // Create bearish OB on structure break
-if bear_break and not na(last_swing_high_bar)
-    // Calculate lookback distance (capped at 50, min 1, within buffer limit of 300)
-    bars_since_swing = bar_index - last_swing_high_bar
-    max_lookback = math.min(math.max(bars_since_swing, 1), 50)
+if bear_break
+    // Find the LAST BULLISH CANDLE before the break (this is the real OB!)
+    ob_found = false
+    ob_idx = 0
 
-    // Only proceed if within valid range
-    if max_lookback > 0 and max_lookback <= 50
-        highest_idx = 0
-        highest_val = high
-        for i = 1 to max_lookback
-            if high[i] > highest_val
-                highest_val := high[i]
-                highest_idx := i
+    // Look back to find the last bullish candle (max 20 bars)
+    for i = 1 to 20
+        if isBullishCandle(i) and not ob_found
+            ob_idx := i
+            ob_found := true
+            break
 
-        ob_top = high[highest_idx]
-        ob_btm = math.min(open[highest_idx], close[highest_idx])
-        ob_str = calcOBStrength(highest_idx)
+    if ob_found and ob_idx > 0
+        // The Order Block is the BODY of the last bullish candle
+        ob_top = high[ob_idx]  // Include the wick for SL
+        ob_btm = math.min(open[ob_idx], close[ob_idx])  // Body low (open for bullish)
+        ob_str = calcOBStrength(ob_idx)
 
         if ob_str >= i_ob_strength
             array.unshift(bear_ob_top, ob_top)
             array.unshift(bear_ob_btm, ob_btm)
-            array.unshift(bear_ob_bar, bar_index - highest_idx)
+            array.unshift(bear_ob_bar, bar_index - ob_idx)
             array.unshift(bear_ob_strength, ob_str)
 
             // Limit array size
@@ -470,53 +493,57 @@ if short_condition and bear_qty > 0
 
 //=============================================================================
 // EXIT LOGIC: TP1 (50%) → BE → TP2 (50%)
+// Using TWO separate exits from start, updating SL after TP1
 //=============================================================================
 
 // Track initial position size for correct partial exits
 var float initial_qty = na
 var float tp1_qty = na
 var float tp2_qty = na
+var float current_sl = na  // Dynamic SL that changes after TP1
 
 // Store initial qty on entry (when position opens)
 if strategy.position_size != 0 and strategy.position_size[1] == 0
     initial_qty := math.abs(strategy.position_size)
     tp1_qty := initial_qty * (i_tp1_pct / 100)
     tp2_qty := initial_qty - tp1_qty
-    tp1_taken := false  // Reset on new position
+    tp1_taken := false
+    current_sl := active_sl  // Start with original SL
 
 // Detect TP1 fill by comparing current vs previous position
-// TP1 is filled when: position was reduced BUT still exists
 position_was_reduced = math.abs(strategy.position_size) < math.abs(strategy.position_size[1])
 position_still_open = strategy.position_size != 0
 
 if position_was_reduced and position_still_open and not tp1_taken
     tp1_taken := true
     if i_move_sl_be and not na(active_entry)
-        active_sl := active_entry  // Move SL to breakeven
+        current_sl := active_entry  // Move SL to breakeven!
 
 // Long Position Management
 if strategy.position_size > 0
-    if not tp1_taken and not na(active_tp1) and not na(tp1_qty)
-        // Phase 1: Set TP1 exit for 50% + SL for protection
-        strategy.exit("TP1", "Long", qty=tp1_qty, limit=active_tp1, stop=active_sl, comment="TP1")
-        // Also set SL for remaining position
-        strategy.exit("SL", "Long", stop=active_sl, comment="SL")
-
-    if tp1_taken and not na(active_tp2)
-        // Phase 2: After TP1 filled, set TP2 with BE stop
-        strategy.exit("TP2", "Long", limit=active_tp2, stop=active_sl, comment="TP2+BE")
+    if not tp1_taken
+        // Phase 1: Exit 50% at TP1, full SL protection
+        strategy.exit("TP1_L", "Long", qty=tp1_qty, limit=active_tp1, stop=current_sl, comment="TP1")
+        // Backup SL for entire position (in case TP1 limit doesn't fill first)
+        strategy.exit("SL_L", "Long", stop=current_sl, comment="SL")
+    else
+        // Phase 2: After TP1, cancel old orders and set TP2 with BE
+        strategy.cancel("TP1_L")
+        strategy.cancel("SL_L")
+        strategy.exit("TP2_L", "Long", limit=active_tp2, stop=current_sl, comment="TP2+BE")
 
 // Short Position Management
 if strategy.position_size < 0
-    if not tp1_taken and not na(active_tp1) and not na(tp1_qty)
-        // Phase 1: Set TP1 exit for 50% + SL for protection
-        strategy.exit("TP1", "Short", qty=tp1_qty, limit=active_tp1, stop=active_sl, comment="TP1")
-        // Also set SL for remaining position
-        strategy.exit("SL", "Short", stop=active_sl, comment="SL")
-
-    if tp1_taken and not na(active_tp2)
-        // Phase 2: After TP1 filled, set TP2 with BE stop
-        strategy.exit("TP2", "Short", limit=active_tp2, stop=active_sl, comment="TP2+BE")
+    if not tp1_taken
+        // Phase 1: Exit 50% at TP1, full SL protection
+        strategy.exit("TP1_S", "Short", qty=tp1_qty, limit=active_tp1, stop=current_sl, comment="TP1")
+        // Backup SL for entire position
+        strategy.exit("SL_S", "Short", stop=current_sl, comment="SL")
+    else
+        // Phase 2: After TP1, cancel old orders and set TP2 with BE
+        strategy.cancel("TP1_S")
+        strategy.cancel("SL_S")
+        strategy.exit("TP2_S", "Short", limit=active_tp2, stop=current_sl, comment="TP2+BE")
 
 // Reset on full position close
 if strategy.position_size == 0 and strategy.position_size[1] != 0
@@ -528,6 +555,7 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0
     initial_qty := na
     tp1_qty := na
     tp2_qty := na
+    current_sl := na
     active_qty := na
     active_leverage := na
     active_position_value := na
@@ -576,13 +604,11 @@ plot(ema_fast, "EMA Fast", color=color.new(#2962FF, 50), linewidth=1)
 plot(ema_slow, "EMA Slow", color=color.new(#FF6D00, 50), linewidth=1)
 
 // Active Trade Levels (only show when in position)
-plot(strategy.position_size != 0 ? active_sl : na, "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
-plot(strategy.position_size != 0 and not tp1_taken ? active_tp1 : na, "TP1 (1:1)", color=color.green, style=plot.style_linebr, linewidth=1)
-plot(strategy.position_size != 0 ? active_tp2 : na, "TP2 (1.5:1)", color=color.lime, style=plot.style_linebr, linewidth=2)
+// Use current_sl which dynamically updates to BE after TP1
+plot(strategy.position_size != 0 ? current_sl : na, "Stop Loss", color=tp1_taken ? color.orange : color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 and not tp1_taken ? active_tp1 : na, "TP1", color=color.green, style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size != 0 ? active_tp2 : na, "TP2", color=color.lime, style=plot.style_linebr, linewidth=2)
 plot(strategy.position_size != 0 ? active_entry : na, "Entry", color=color.blue, style=plot.style_linebr, linewidth=1)
-
-// Show BE level after TP1
-plot(strategy.position_size != 0 and tp1_taken ? active_entry : na, "Breakeven", color=color.orange, style=plot.style_linebr, linewidth=2)
 
 //=============================================================================
 // INFO TABLE - Shows Risk, Leverage, Position Details
