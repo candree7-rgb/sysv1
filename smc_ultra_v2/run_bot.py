@@ -676,17 +676,33 @@ def run_scalper_live():
                                 print(f"  [RELEASE] OB freed for {info['symbol']}", flush=True)
                             del pending_orders[order_id]
 
-                    # Check filled
+                    # Check filled - verify order is gone AND position exists
                     open_orders = executor.get_open_orders()
                     open_ids = {o['orderId'] for o in open_orders}
                     for oid in list(pending_orders.keys()):
                         if oid not in open_ids:
                             info = pending_orders.pop(oid)
+                            sym = info['symbol']
+
+                            # IMPORTANT: Verify position actually exists before marking as filled
+                            # Order could have been rejected/cancelled, not filled
+                            pos = executor.get_position(sym)
+                            if pos is None or pos.size == 0:
+                                # No position = order was NOT filled (rejected/cancelled)
+                                print(f"  [CANCELLED] {sym} order gone but no position - likely rejected", flush=True)
+                                # Release OB for reuse
+                                if 'ob_key' in info:
+                                    used_obs.discard(info['ob_key'])
+                                # Clean up trade_pairs if exists
+                                if sym in trade_pairs:
+                                    del trade_pairs[sym]
+                                continue
+
+                            # Position exists = order was filled
                             # Mark this OB as used so we don't trade it again!
                             if 'ob_key' in info:
                                 used_obs.add(info['ob_key'])
                             # Mark trade entry as filled for exit detection
-                            sym = info['symbol']
                             if sym in trade_pairs:
                                 trade_pairs[sym]['entry_filled'] = True
                                 trade_pairs[sym]['initial_qty'] = trade_pairs[sym].get('qty', 0)
