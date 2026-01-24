@@ -1,14 +1,22 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
 // SMC Order Block Scalping Strategy - 5min TF optimized
 // TP1: 1:1 RR (50%), TP2: 1.5:1 RR (50%), SL moves to BE after TP1
+// Dynamic Position Sizing: Risk exactly X% per trade
 //@version=6
-strategy("SMC OB Scalper", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, calc_on_every_tick=false, process_orders_on_close=true)
+strategy("SMC OB Scalper v2", overlay=true, default_qty_type=strategy.cash, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, calc_on_every_tick=false, process_orders_on_close=true, margin_long=5, margin_short=5)
+
+//=============================================================================
+// INPUTS - Risk Management (IMPORTANT!)
+//=============================================================================
+grp_risk = "Risk Management"
+i_risk_pct      = input.float(2.0, "Risk % per Trade", minval=0.5, maxval=10, step=0.5, group=grp_risk, tooltip="Max loss per trade as % of equity. SL hit = this % loss.")
+i_max_leverage  = input.float(20.0, "Max Leverage", minval=1, maxval=50, step=1, group=grp_risk, tooltip="Cap leverage to prevent margin calls")
+i_direction     = input.string("Both", "Trade Direction", options=["Long", "Short", "Both"], group=grp_risk)
 
 //=============================================================================
 // INPUTS - Strategy Settings (Scalping Optimized)
 //=============================================================================
 grp_strat = "Strategy Settings"
-i_direction     = input.string("Both", "Trade Direction", options=["Long", "Short", "Both"], group=grp_strat)
 i_sl_buffer     = input.float(0.05, "SL Buffer %", minval=0.0, maxval=1.0, step=0.01, group=grp_strat, tooltip="Buffer below OB for Long SL, above OB for Short SL")
 i_max_ob_age    = input.int(20, "Max OB Age (bars)", minval=5, maxval=100, group=grp_strat, tooltip="OBs older than this are ignored")
 
@@ -102,6 +110,39 @@ inTradingHours() =>
         hour >= i_start_hour and hour < i_end_hour
     else
         true
+
+//=============================================================================
+// POSITION SIZE CALCULATION (Risk-Based)
+//=============================================================================
+// Formula: position_size = (equity * risk%) / (entry - sl)
+// This ensures SL hit = exactly risk% loss
+
+calcPositionSize(float entry_price, float sl_price) =>
+    // Calculate risk amount in currency
+    equity = strategy.equity
+    risk_amount = equity * (i_risk_pct / 100)
+
+    // Calculate SL distance in price
+    sl_distance = math.abs(entry_price - sl_price)
+
+    // Calculate position size (in units/contracts)
+    qty = sl_distance > 0 ? risk_amount / sl_distance : 0
+
+    // Calculate position value and leverage
+    position_value = qty * entry_price
+    leverage = position_value / equity
+
+    // Cap leverage if too high
+    if leverage > i_max_leverage
+        qty := (equity * i_max_leverage) / entry_price
+        leverage := i_max_leverage
+
+    [qty, leverage, position_value]
+
+// Track calculated values for display
+var float active_qty = na
+var float active_leverage = na
+var float active_position_value = na
 
 //=============================================================================
 // MTF TREND DETECTION
@@ -259,6 +300,7 @@ var float bull_entry = na
 var float bull_sl = na
 var float bull_tp1 = na
 var float bull_tp2 = na
+var float bull_qty = na
 
 bull_ob_signal = false
 if array.size(bull_ob_top) > 0 and strategy.position_size == 0
@@ -290,6 +332,10 @@ if array.size(bull_ob_top) > 0 and strategy.position_size == 0
                 sl_dist = bull_entry - bull_sl
                 bull_tp1 := bull_entry + (sl_dist * i_tp1_rr)  // TP1 at 1:1
                 bull_tp2 := bull_entry + (sl_dist * i_tp2_rr)  // TP2 at 1.5:1
+
+                // Calculate position size based on risk
+                [qty, lev, pos_val] = calcPositionSize(bull_entry, bull_sl)
+                bull_qty := qty
                 break
 
 // Check for bearish OB entry (price touches bearish OB from below)
@@ -298,6 +344,7 @@ var float bear_entry = na
 var float bear_sl = na
 var float bear_tp1 = na
 var float bear_tp2 = na
+var float bear_qty = na
 
 bear_ob_signal = false
 if array.size(bear_ob_top) > 0 and strategy.position_size == 0
@@ -329,6 +376,10 @@ if array.size(bear_ob_top) > 0 and strategy.position_size == 0
                 sl_dist = bear_sl - bear_entry
                 bear_tp1 := bear_entry - (sl_dist * i_tp1_rr)  // TP1 at 1:1
                 bear_tp2 := bear_entry - (sl_dist * i_tp2_rr)  // TP2 at 1.5:1
+
+                // Calculate position size based on risk
+                [qty, lev, pos_val] = calcPositionSize(bear_entry, bear_sl)
+                bear_qty := qty
                 break
 
 //=============================================================================
@@ -363,15 +414,20 @@ var float active_tp1 = na
 var float active_tp2 = na
 var bool is_long = false
 
-// Entry: Long
-if long_condition
-    strategy.entry("Long", strategy.long)
+// Entry: Long with calculated position size
+if long_condition and bull_qty > 0
+    strategy.entry("Long", strategy.long, qty=bull_qty)
     active_entry := bull_entry
     active_sl := bull_sl
     active_tp1 := bull_tp1
     active_tp2 := bull_tp2
     tp1_taken := false
     is_long := true
+
+    // Store for display
+    active_qty := bull_qty
+    active_leverage := (bull_qty * bull_entry) / strategy.equity
+    active_position_value := bull_qty * bull_entry
 
     // Remove used OB
     if active_bull_ob_idx >= 0 and active_bull_ob_idx < array.size(bull_ob_top)
@@ -380,15 +436,20 @@ if long_condition
         array.remove(bull_ob_bar, active_bull_ob_idx)
         array.remove(bull_ob_strength, active_bull_ob_idx)
 
-// Entry: Short
-if short_condition
-    strategy.entry("Short", strategy.short)
+// Entry: Short with calculated position size
+if short_condition and bear_qty > 0
+    strategy.entry("Short", strategy.short, qty=bear_qty)
     active_entry := bear_entry
     active_sl := bear_sl
     active_tp1 := bear_tp1
     active_tp2 := bear_tp2
     tp1_taken := false
     is_long := false
+
+    // Store for display
+    active_qty := bear_qty
+    active_leverage := (bear_qty * bear_entry) / strategy.equity
+    active_position_value := bear_qty * bear_entry
 
     // Remove used OB
     if active_bear_ob_idx >= 0 and active_bear_ob_idx < array.size(bear_ob_top)
@@ -401,47 +462,68 @@ if short_condition
 // EXIT LOGIC: TP1 (50%) → BE → TP2 (50%)
 //=============================================================================
 
+// Track initial position size for correct partial exits
+var float initial_qty = na
+var float tp1_qty = na
+var float tp2_qty = na
+
+// Store initial qty on entry
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    initial_qty := math.abs(strategy.position_size)
+    tp1_qty := initial_qty * (i_tp1_pct / 100)
+    tp2_qty := initial_qty - tp1_qty
+
 // Long Position Management
 if strategy.position_size > 0
-    // TP1 not yet taken - set both exits
-    if not tp1_taken
-        // Exit TP1: 50% at 1:1 RR
-        strategy.exit("TP1", "Long", qty_percent=i_tp1_pct, limit=active_tp1, stop=active_sl, comment="TP1 1:1")
+    current_pos = strategy.position_size
 
-        // Check if TP1 was hit this bar
-        if high >= active_tp1
+    // TP1 not yet taken
+    if not tp1_taken and not na(active_tp1)
+        // Set TP1 exit for 50% with SL protection
+        strategy.exit("TP1", "Long", qty=tp1_qty, limit=active_tp1, stop=active_sl, comment="TP1")
+
+        // Detect if TP1 was filled (position reduced but not closed)
+        if current_pos < initial_qty and current_pos > 0
             tp1_taken := true
             if i_move_sl_be
                 active_sl := active_entry  // Move SL to breakeven
 
-    // After TP1: remaining 50% with BE stop and TP2
-    if tp1_taken
-        strategy.exit("TP2", "Long", limit=active_tp2, stop=active_sl, comment="TP2 1.5:1")
+    // After TP1: exit remaining with BE stop and TP2
+    if tp1_taken and not na(active_tp2)
+        strategy.exit("TP2", "Long", limit=active_tp2, stop=active_sl, comment="TP2+BE")
 
 // Short Position Management
 if strategy.position_size < 0
-    // TP1 not yet taken - set both exits
-    if not tp1_taken
-        // Exit TP1: 50% at 1:1 RR
-        strategy.exit("TP1", "Short", qty_percent=i_tp1_pct, limit=active_tp1, stop=active_sl, comment="TP1 1:1")
+    current_pos = math.abs(strategy.position_size)
 
-        // Check if TP1 was hit this bar
-        if low <= active_tp1
+    // TP1 not yet taken
+    if not tp1_taken and not na(active_tp1)
+        // Set TP1 exit for 50% with SL protection
+        strategy.exit("TP1", "Short", qty=tp1_qty, limit=active_tp1, stop=active_sl, comment="TP1")
+
+        // Detect if TP1 was filled (position reduced but not closed)
+        if current_pos < initial_qty and current_pos > 0
             tp1_taken := true
             if i_move_sl_be
                 active_sl := active_entry  // Move SL to breakeven
 
-    // After TP1: remaining 50% with BE stop and TP2
-    if tp1_taken
-        strategy.exit("TP2", "Short", limit=active_tp2, stop=active_sl, comment="TP2 1.5:1")
+    // After TP1: exit remaining with BE stop and TP2
+    if tp1_taken and not na(active_tp2)
+        strategy.exit("TP2", "Short", limit=active_tp2, stop=active_sl, comment="TP2+BE")
 
-// Reset on position close
+// Reset on full position close
 if strategy.position_size == 0 and strategy.position_size[1] != 0
     tp1_taken := false
     active_entry := na
     active_sl := na
     active_tp1 := na
     active_tp2 := na
+    initial_qty := na
+    tp1_qty := na
+    tp2_qty := na
+    active_qty := na
+    active_leverage := na
+    active_position_value := na
 
 //=============================================================================
 // VISUALS - Order Block Boxes
@@ -494,6 +576,48 @@ plot(strategy.position_size != 0 ? active_entry : na, "Entry", color=color.blue,
 
 // Show BE level after TP1
 plot(strategy.position_size != 0 and tp1_taken ? active_entry : na, "Breakeven", color=color.orange, style=plot.style_linebr, linewidth=2)
+
+//=============================================================================
+// INFO TABLE - Shows Risk, Leverage, Position Details
+//=============================================================================
+var table infoTable = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    // Headers
+    table.cell(infoTable, 0, 0, "Parameter", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, "Value", text_color=color.white, text_size=size.small)
+
+    // Risk %
+    table.cell(infoTable, 0, 1, "Risk/Trade", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(i_risk_pct, "#.#") + "%", text_color=color.yellow, text_size=size.small)
+
+    // Max Leverage Setting
+    table.cell(infoTable, 0, 2, "Max Leverage", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(i_max_leverage, "#.#") + "x", text_color=color.white, text_size=size.small)
+
+    // Current Position Info (only when in trade)
+    if strategy.position_size != 0
+        // Active Leverage
+        table.cell(infoTable, 0, 3, "Active Lev", text_color=color.gray, text_size=size.small)
+        lev_color = active_leverage > i_max_leverage * 0.8 ? color.red : color.green
+        table.cell(infoTable, 1, 3, str.tostring(active_leverage, "#.##") + "x", text_color=lev_color, text_size=size.small)
+
+        // Position Value
+        table.cell(infoTable, 0, 4, "Pos Value", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 4, "$" + str.tostring(active_position_value, "#.##"), text_color=color.white, text_size=size.small)
+
+        // TP1 Status
+        table.cell(infoTable, 0, 5, "TP1 Status", text_color=color.gray, text_size=size.small)
+        tp1_status = tp1_taken ? "FILLED ✓" : "Pending"
+        tp1_color = tp1_taken ? color.green : color.orange
+        table.cell(infoTable, 1, 5, tp1_status, text_color=tp1_color, text_size=size.small)
+    else
+        table.cell(infoTable, 0, 3, "Position", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 3, "FLAT", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 0, 4, "", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 4, "", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 0, 5, "", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 5, "", text_color=color.gray, text_size=size.small)
 
 //=============================================================================
 // ALERTS
