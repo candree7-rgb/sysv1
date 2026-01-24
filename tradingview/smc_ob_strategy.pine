@@ -1,25 +1,23 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
-// Strategy based on LuxAlgo Order Blocks + Custom MTF Logic
-// Converted to Pine Script v6 Strategy for accurate backtesting
+// SMC Order Block Scalping Strategy - 5min TF optimized
+// TP1: 1:1 RR (50%), TP2: 1.5:1 RR (50%), SL moves to BE after TP1
 //@version=6
-strategy("SMC Order Block Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=2, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06)
+strategy("SMC OB Scalper", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, calc_on_every_tick=false, process_orders_on_close=true)
 
 //=============================================================================
-// INPUTS - Strategy Settings
+// INPUTS - Strategy Settings (Scalping Optimized)
 //=============================================================================
 grp_strat = "Strategy Settings"
 i_direction     = input.string("Both", "Trade Direction", options=["Long", "Short", "Both"], group=grp_strat)
-i_risk_pct      = input.float(2.0, "Risk % per Trade", minval=0.1, maxval=10, step=0.1, group=grp_strat)
-i_rr_ratio      = input.float(2.0, "Risk:Reward Ratio", minval=1.0, maxval=5.0, step=0.5, group=grp_strat)
-i_sl_buffer     = input.float(0.5, "SL Buffer %", minval=0.0, maxval=2.0, step=0.1, group=grp_strat, tooltip="Extra buffer below/above OB for SL")
-i_max_ob_age    = input.int(30, "Max OB Age (bars)", minval=5, maxval=100, group=grp_strat)
+i_sl_buffer     = input.float(0.05, "SL Buffer %", minval=0.0, maxval=1.0, step=0.01, group=grp_strat, tooltip="Buffer below OB for Long SL, above OB for Short SL")
+i_max_ob_age    = input.int(20, "Max OB Age (bars)", minval=5, maxval=100, group=grp_strat, tooltip="OBs older than this are ignored")
 
-// Partial TP Settings
-grp_partial = "Partial Take Profit"
-i_use_partial   = input.bool(true, "Use Partial TP", group=grp_partial)
-i_partial_pct   = input.float(50, "Partial TP Size %", minval=10, maxval=90, step=10, group=grp_partial)
-i_partial_level = input.float(50, "Partial TP at % of Full TP", minval=25, maxval=75, step=5, group=grp_partial)
-i_move_sl_be    = input.bool(true, "Move SL to BE after Partial", group=grp_partial)
+// Take Profit Settings (Fixed RR)
+grp_tp = "Take Profit Settings"
+i_tp1_rr        = input.float(1.0, "TP1 Risk:Reward", minval=0.5, maxval=3.0, step=0.1, group=grp_tp, tooltip="TP1 at 1:1 RR")
+i_tp1_pct       = input.float(50, "TP1 Position %", minval=10, maxval=90, step=10, group=grp_tp, tooltip="Close 50% at TP1")
+i_tp2_rr        = input.float(1.5, "TP2 Risk:Reward", minval=1.0, maxval=5.0, step=0.1, group=grp_tp, tooltip="TP2 at 1.5:1 RR for remaining position")
+i_move_sl_be    = input.bool(true, "Move SL to BE after TP1", group=grp_tp)
 
 //=============================================================================
 // INPUTS - Order Block Settings
@@ -259,7 +257,8 @@ if bear_break and not na(last_swing_high_bar)
 var int active_bull_ob_idx = -1
 var float bull_entry = na
 var float bull_sl = na
-var float bull_tp = na
+var float bull_tp1 = na
+var float bull_tp2 = na
 
 bull_ob_signal = false
 if array.size(bull_ob_top) > 0 and strategy.position_size == 0
@@ -286,17 +285,19 @@ if array.size(bull_ob_top) > 0 and strategy.position_size == 0
             if entry_trigger
                 bull_ob_signal := true
                 active_bull_ob_idx := i
-                bull_entry := ob_top
-                bull_sl := ob_btm * (1 - i_sl_buffer/100)
+                bull_entry := close  // Entry at current close
+                bull_sl := ob_btm * (1 - i_sl_buffer/100)  // SL below OB + buffer
                 sl_dist = bull_entry - bull_sl
-                bull_tp := bull_entry + (sl_dist * i_rr_ratio)
+                bull_tp1 := bull_entry + (sl_dist * i_tp1_rr)  // TP1 at 1:1
+                bull_tp2 := bull_entry + (sl_dist * i_tp2_rr)  // TP2 at 1.5:1
                 break
 
 // Check for bearish OB entry (price touches bearish OB from below)
 var int active_bear_ob_idx = -1
 var float bear_entry = na
 var float bear_sl = na
-var float bear_tp = na
+var float bear_tp1 = na
+var float bear_tp2 = na
 
 bear_ob_signal = false
 if array.size(bear_ob_top) > 0 and strategy.position_size == 0
@@ -323,10 +324,11 @@ if array.size(bear_ob_top) > 0 and strategy.position_size == 0
             if entry_trigger
                 bear_ob_signal := true
                 active_bear_ob_idx := i
-                bear_entry := ob_btm
-                bear_sl := ob_top * (1 + i_sl_buffer/100)
+                bear_entry := close  // Entry at current close
+                bear_sl := ob_top * (1 + i_sl_buffer/100)  // SL above OB + buffer
                 sl_dist = bear_sl - bear_entry
-                bear_tp := bear_entry - (sl_dist * i_rr_ratio)
+                bear_tp1 := bear_entry - (sl_dist * i_tp1_rr)  // TP1 at 1:1
+                bear_tp2 := bear_entry - (sl_dist * i_tp2_rr)  // TP2 at 1.5:1
                 break
 
 //=============================================================================
@@ -353,14 +355,23 @@ short_condition = bear_ob_signal and
 // STRATEGY EXECUTION
 //=============================================================================
 
-// Track partial TP
-var bool partial_taken = false
-var float entry_price = na
+// Track position state
+var bool tp1_taken = false
+var float active_entry = na
+var float active_sl = na
+var float active_tp1 = na
+var float active_tp2 = na
+var bool is_long = false
 
+// Entry: Long
 if long_condition
     strategy.entry("Long", strategy.long)
-    entry_price := close
-    partial_taken := false
+    active_entry := bull_entry
+    active_sl := bull_sl
+    active_tp1 := bull_tp1
+    active_tp2 := bull_tp2
+    tp1_taken := false
+    is_long := true
 
     // Remove used OB
     if active_bull_ob_idx >= 0 and active_bull_ob_idx < array.size(bull_ob_top)
@@ -369,10 +380,15 @@ if long_condition
         array.remove(bull_ob_bar, active_bull_ob_idx)
         array.remove(bull_ob_strength, active_bull_ob_idx)
 
+// Entry: Short
 if short_condition
     strategy.entry("Short", strategy.short)
-    entry_price := close
-    partial_taken := false
+    active_entry := bear_entry
+    active_sl := bear_sl
+    active_tp1 := bear_tp1
+    active_tp2 := bear_tp2
+    tp1_taken := false
+    is_long := false
 
     // Remove used OB
     if active_bear_ob_idx >= 0 and active_bear_ob_idx < array.size(bear_ob_top)
@@ -381,34 +397,51 @@ if short_condition
         array.remove(bear_ob_bar, active_bear_ob_idx)
         array.remove(bear_ob_strength, active_bear_ob_idx)
 
-// Exit logic with partial TP
-if strategy.position_size > 0  // Long position
-    current_sl = bull_sl
+//=============================================================================
+// EXIT LOGIC: TP1 (50%) → BE → TP2 (50%)
+//=============================================================================
 
-    // Partial TP
-    if i_use_partial and not partial_taken
-        partial_tp_price = entry_price + (bull_tp - entry_price) * (i_partial_level / 100)
-        if high >= partial_tp_price
-            strategy.close("Long", qty_percent=i_partial_pct, comment="Partial TP")
-            partial_taken := true
+// Long Position Management
+if strategy.position_size > 0
+    // TP1 not yet taken - set both exits
+    if not tp1_taken
+        // Exit TP1: 50% at 1:1 RR
+        strategy.exit("TP1", "Long", qty_percent=i_tp1_pct, limit=active_tp1, stop=active_sl, comment="TP1 1:1")
+
+        // Check if TP1 was hit this bar
+        if high >= active_tp1
+            tp1_taken := true
             if i_move_sl_be
-                current_sl := entry_price * 1.001  // Move SL to BE + 0.1%
+                active_sl := active_entry  // Move SL to breakeven
 
-    strategy.exit("Long Exit", "Long", stop=current_sl, limit=bull_tp)
+    // After TP1: remaining 50% with BE stop and TP2
+    if tp1_taken
+        strategy.exit("TP2", "Long", limit=active_tp2, stop=active_sl, comment="TP2 1.5:1")
 
-if strategy.position_size < 0  // Short position
-    current_sl = bear_sl
+// Short Position Management
+if strategy.position_size < 0
+    // TP1 not yet taken - set both exits
+    if not tp1_taken
+        // Exit TP1: 50% at 1:1 RR
+        strategy.exit("TP1", "Short", qty_percent=i_tp1_pct, limit=active_tp1, stop=active_sl, comment="TP1 1:1")
 
-    // Partial TP
-    if i_use_partial and not partial_taken
-        partial_tp_price = entry_price - (entry_price - bear_tp) * (i_partial_level / 100)
-        if low <= partial_tp_price
-            strategy.close("Short", qty_percent=i_partial_pct, comment="Partial TP")
-            partial_taken := true
+        // Check if TP1 was hit this bar
+        if low <= active_tp1
+            tp1_taken := true
             if i_move_sl_be
-                current_sl := entry_price * 0.999  // Move SL to BE - 0.1%
+                active_sl := active_entry  // Move SL to breakeven
 
-    strategy.exit("Short Exit", "Short", stop=current_sl, limit=bear_tp)
+    // After TP1: remaining 50% with BE stop and TP2
+    if tp1_taken
+        strategy.exit("TP2", "Short", limit=active_tp2, stop=active_sl, comment="TP2 1.5:1")
+
+// Reset on position close
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tp1_taken := false
+    active_entry := na
+    active_sl := na
+    active_tp1 := na
+    active_tp2 := na
 
 //=============================================================================
 // VISUALS - Order Block Boxes
@@ -452,6 +485,15 @@ plotshape(short_condition, title="Short Signal", location=location.abovebar, col
 // EMAs
 plot(ema_fast, "EMA Fast", color=color.new(#2962FF, 50), linewidth=1)
 plot(ema_slow, "EMA Slow", color=color.new(#FF6D00, 50), linewidth=1)
+
+// Active Trade Levels (only show when in position)
+plot(strategy.position_size != 0 ? active_sl : na, "Stop Loss", color=color.red, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 and not tp1_taken ? active_tp1 : na, "TP1 (1:1)", color=color.green, style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size != 0 ? active_tp2 : na, "TP2 (1.5:1)", color=color.lime, style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? active_entry : na, "Entry", color=color.blue, style=plot.style_linebr, linewidth=1)
+
+// Show BE level after TP1
+plot(strategy.position_size != 0 and tp1_taken ? active_entry : na, "Breakeven", color=color.orange, style=plot.style_linebr, linewidth=2)
 
 //=============================================================================
 // ALERTS
