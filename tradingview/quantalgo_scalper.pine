@@ -40,86 +40,108 @@ biasStr = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
 //=============================================================================
 // FVG DETECTION (Fair Value Gap)
 //=============================================================================
-bullFvg = i_use_fvg and low > high[2]  // Gap up: current low above 2-bars-ago high
-bearFvg = i_use_fvg and high < low[2]  // Gap down: current high below 2-bars-ago low
+bullFvg = i_use_fvg and low > high[2]
+bearFvg = i_use_fvg and high < low[2]
 
 //=============================================================================
 // OB DETECTION (Order Block - simplified)
 //=============================================================================
 atr = ta.atr(14)
-// Bullish OB: Current bullish engulfs previous bearish candle
 bullOb = i_use_ob and close > open and (close - open) > atr * 0.3 and close[1] < open[1]
-// Bearish OB: Current bearish engulfs previous bullish candle
 bearOb = i_use_ob and close < open and (open - close) > atr * 0.3 and close[1] > open[1]
 
 //=============================================================================
 // ENTRY SIGNALS
 //=============================================================================
-// Long: FVG or OB detected + bias filter (if enabled)
 longSignal = (bullFvg or bullOb) and strategy.position_size == 0
 if i_require_bias
     longSignal := longSignal and bias >= 0
 
-// Short: FVG or OB detected + bias filter (if enabled)
 shortSignal = (bearFvg or bearOb) and strategy.position_size == 0
 if i_require_bias
     shortSignal := shortSignal and bias <= 0
 
 //=============================================================================
-// POSITION STATE TRACKING
+// POSITION STATE TRACKING - Set on entry, persist until exit
 //=============================================================================
-var float active_entry = na
-var float active_sl = na
-var float active_tp = na
+var float entry_price = na
+var float sl_price = na
+var float tp_price = na
+var bool is_long = false
 
 //=============================================================================
-// ENTRIES
+// ENTRIES - Set levels BEFORE calling strategy.entry
 //=============================================================================
 if longSignal
-    active_entry := close
+    entry_price := close
     sl_distance = close * (i_sl_pct / 100)
-    active_sl := close - sl_distance
-    active_tp := close + (sl_distance * i_tp_rr)
+    sl_price := close - sl_distance
+    tp_price := close + (sl_distance * i_tp_rr)
+    is_long := true
     strategy.entry("Long", strategy.long)
 
 if shortSignal
-    active_entry := close
+    entry_price := close
     sl_distance = close * (i_sl_pct / 100)
-    active_sl := close + sl_distance
-    active_tp := close - (sl_distance * i_tp_rr)
+    sl_price := close + sl_distance
+    tp_price := close - (sl_distance * i_tp_rr)
+    is_long := false
     strategy.entry("Short", strategy.short)
 
 //=============================================================================
-// EXIT LOGIC - Using limit= and stop= (PRICE LEVELS, not ticks!)
-// This is the correct way - same as smc_ob_strategy.pine
+// DETECT NEW POSITION - Recalculate SL/TP if they got reset
+// This catches cases where exit and entry happen on same bar
 //=============================================================================
-if strategy.position_size > 0
-    // Long position: TP above, SL below
-    strategy.exit("Exit_L", "Long", limit=active_tp, stop=active_sl, comment="TP/SL")
+just_entered = strategy.position_size != 0 and strategy.position_size[1] == 0
+if just_entered and na(sl_price)
+    // Fallback: recalculate from position avg price
+    entry_price := strategy.position_avg_price
+    sl_distance = entry_price * (i_sl_pct / 100)
+    if strategy.position_size > 0
+        sl_price := entry_price - sl_distance
+        tp_price := entry_price + (sl_distance * i_tp_rr)
+        is_long := true
+    else
+        sl_price := entry_price + sl_distance
+        tp_price := entry_price - (sl_distance * i_tp_rr)
+        is_long := false
 
-if strategy.position_size < 0
-    // Short position: TP below, SL above
-    strategy.exit("Exit_S", "Short", limit=active_tp, stop=active_sl, comment="TP/SL")
+//=============================================================================
+// EXIT LOGIC WITH GAP PROTECTION
+// If price gaps through SL, close immediately at market
+//=============================================================================
+if strategy.position_size > 0 and not na(sl_price) and not na(tp_price)
+    // GAP PROTECTION: If bar opens below SL, close immediately
+    if open < sl_price
+        strategy.close("Long", comment="SL Gap")
+    else
+        strategy.exit("XL", "Long", limit=tp_price, stop=sl_price)
 
-// Reset on position close
+if strategy.position_size < 0 and not na(sl_price) and not na(tp_price)
+    // GAP PROTECTION: If bar opens above SL, close immediately
+    if open > sl_price
+        strategy.close("Short", comment="SL Gap")
+    else
+        strategy.exit("XS", "Short", limit=tp_price, stop=sl_price)
+
+//=============================================================================
+// RESET ON POSITION CLOSE
+//=============================================================================
 if strategy.position_size == 0 and strategy.position_size[1] != 0
-    active_entry := na
-    active_sl := na
-    active_tp := na
+    entry_price := na
+    sl_price := na
+    tp_price := na
 
 //=============================================================================
 // VISUALS
 //=============================================================================
-// Entry signals
 plotshape(longSignal, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
 plotshape(shortSignal, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
 
-// Active trade levels
-plot(strategy.position_size != 0 ? active_entry : na, "Entry", color.blue, 1, plot.style_linebr)
-plot(strategy.position_size != 0 ? active_tp : na, "TP", color.green, 2, plot.style_linebr)
-plot(strategy.position_size != 0 ? active_sl : na, "SL", color.red, 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? entry_price : na, "Entry", color.blue, 1, plot.style_linebr)
+plot(strategy.position_size != 0 ? tp_price : na, "TP", color.green, 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? sl_price : na, "SL", color.red, 2, plot.style_linebr)
 
-// Current TF EMAs for reference
 emaFastCurrent = ta.ema(close, i_ema_fast)
 emaSlowCurrent = ta.ema(close, i_ema_slow)
 plot(emaFastCurrent, "EMA Fast", color.new(color.blue, 70), 1)
@@ -131,7 +153,6 @@ plot(emaSlowCurrent, "EMA Slow", color.new(color.orange, 70), 1)
 if i_show_table and barstate.islast
     var table perfTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
 
-    // Calculate metrics
     wins = strategy.wintrades
     losses = strategy.losstrades
     total = strategy.closedtrades
@@ -140,59 +161,45 @@ if i_show_table and barstate.islast
     maxDD = strategy.max_drawdown / strategy.initial_capital * 100
     netProfit = strategy.netprofit
     netProfitPct = netProfit / strategy.initial_capital * 100
-    avgWin = wins > 0 ? strategy.grossprofit / wins : 0
-    avgLoss = losses > 0 ? math.abs(strategy.grossloss) / losses : 0
 
-    // Header
     table.cell(perfTable, 0, 0, "SMC SCALPER PRO", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
-    table.cell(perfTable, 1, 0, "v1.0", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
+    table.cell(perfTable, 1, 0, "v1.1", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
 
-    // Bias TF
     table.cell(perfTable, 0, 1, "Bias TF", text_color=color.gray, text_size=size.small)
     table.cell(perfTable, 1, 1, biasTFStr, text_color=color.white, text_size=size.small)
 
-    // Current Bias
     table.cell(perfTable, 0, 2, "Bias", text_color=color.gray, text_size=size.small)
     biasColor = bias == 1 ? color.green : bias == -1 ? color.red : color.gray
     table.cell(perfTable, 1, 2, biasStr, text_color=biasColor, text_size=size.small)
 
-    // Total Trades
     table.cell(perfTable, 0, 3, "Total Trades", text_color=color.gray, text_size=size.small)
     table.cell(perfTable, 1, 3, str.tostring(total), text_color=color.white, text_size=size.small)
 
-    // Wins / Losses
     table.cell(perfTable, 0, 4, "W / L", text_color=color.gray, text_size=size.small)
     table.cell(perfTable, 1, 4, str.tostring(wins) + " / " + str.tostring(losses), text_color=color.white, text_size=size.small)
 
-    // Win Rate
     table.cell(perfTable, 0, 5, "Win Rate", text_color=color.gray, text_size=size.small)
     wrColor = winRate >= 55 ? color.green : winRate >= 45 ? color.yellow : color.red
     table.cell(perfTable, 1, 5, str.tostring(winRate, "#.#") + "%", text_color=wrColor, text_size=size.small)
 
-    // Profit Factor
     table.cell(perfTable, 0, 6, "Profit Factor", text_color=color.gray, text_size=size.small)
     pfColor = profitFactor >= 1.5 ? color.green : profitFactor >= 1.0 ? color.yellow : color.red
     table.cell(perfTable, 1, 6, str.tostring(profitFactor, "#.##"), text_color=pfColor, text_size=size.small)
 
-    // Max Drawdown
     table.cell(perfTable, 0, 7, "Max DD", text_color=color.gray, text_size=size.small)
     table.cell(perfTable, 1, 7, str.tostring(maxDD, "#.#") + "%", text_color=color.red, text_size=size.small)
 
-    // SL / TP Settings
     tpPct = i_sl_pct * i_tp_rr
     table.cell(perfTable, 0, 8, "SL / TP", text_color=color.gray, text_size=size.small)
     table.cell(perfTable, 1, 8, str.tostring(i_sl_pct, "#.#") + "% / " + str.tostring(tpPct, "#.#") + "%", text_color=color.aqua, text_size=size.small)
 
-    // RR
     table.cell(perfTable, 0, 9, "Risk:Reward", text_color=color.gray, text_size=size.small)
     table.cell(perfTable, 1, 9, "1:" + str.tostring(i_tp_rr, "#.#"), text_color=color.aqua, text_size=size.small)
 
-    // Net Profit
     table.cell(perfTable, 0, 10, "Net Profit", text_color=color.gray, text_size=size.small)
     npColor = netProfit >= 0 ? color.green : color.red
     table.cell(perfTable, 1, 10, str.tostring(netProfitPct, "#.#") + "%", text_color=npColor, text_size=size.small)
 
-    // Status
     table.cell(perfTable, 0, 11, "Status", text_color=color.gray, text_size=size.small)
     posStatus = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
     posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
