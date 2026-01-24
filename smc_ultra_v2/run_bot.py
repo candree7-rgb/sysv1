@@ -373,12 +373,14 @@ def run_scalper_live():
                     continue
 
                 # === SAFETY: Check if position has SL after any fill ===
-                # Small delay to let the order settle
-                time.sleep(0.5)
-                has_sl, current_sl, entry_price_pos, pos_side = executor.check_position_has_sl(symbol)
-                if not has_sl and entry_price_pos:
-                    print(f"\n  [DANGER] {symbol} has NO SL! Setting emergency SL...", flush=True)
-                    executor.set_emergency_sl(symbol, entry_price_pos, pos_side, max_loss_pct=2.0)
+                # Skip for tracked trades - they have order-attached TP/SL already
+                if symbol not in trade_pairs:
+                    # Unknown position - check if it has SL protection
+                    time.sleep(0.5)
+                    has_sl, current_sl, entry_price_pos, pos_side = executor.check_position_has_sl(symbol)
+                    if not has_sl and entry_price_pos:
+                        print(f"\n  [DANGER] {symbol} has NO SL! Setting emergency SL...", flush=True)
+                        executor.set_emergency_sl(symbol, entry_price_pos, pos_side, max_loss_pct=2.0)
 
                 # Check if this is part of a tracked trade
                 if symbol not in trade_pairs:
