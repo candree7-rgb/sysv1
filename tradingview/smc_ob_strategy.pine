@@ -608,9 +608,9 @@ if position_was_reduced and position_still_open and not tp1_taken
 
 // Long Position Management
 if strategy.position_size > 0
-    // GAP PROTECTION: If price gaps below SL, close immediately at market
-    // Uses effective_sl which falls back to active_sl if current_sl not set yet
-    if not na(effective_sl) and low < effective_sl
+    // GAP PROTECTION: Only if bar OPENS below SL (actual gap through SL)
+    // If open > SL but low < SL, the normal stop order handles it correctly
+    if not na(effective_sl) and open < effective_sl
         strategy.close("Long", comment="SL Gap")
     else
         // Always set TP1 for 50% (limit only, no stop)
@@ -622,9 +622,9 @@ if strategy.position_size > 0
 
 // Short Position Management
 if strategy.position_size < 0
-    // GAP PROTECTION: If price gaps above SL, close immediately at market
-    // Uses effective_sl which falls back to active_sl if current_sl not set yet
-    if not na(effective_sl) and high > effective_sl
+    // GAP PROTECTION: Only if bar OPENS above SL (actual gap through SL)
+    // If open < SL but high > SL, the normal stop order handles it correctly
+    if not na(effective_sl) and open > effective_sl
         strategy.close("Short", comment="SL Gap")
     else
         // Always set TP1 for 50% (limit only, no stop)
