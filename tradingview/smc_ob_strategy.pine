@@ -6,12 +6,15 @@
 strategy("SMC OB Scalper v2", overlay=true, default_qty_type=strategy.cash, default_qty_value=100, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, calc_on_every_tick=false, process_orders_on_close=true, margin_long=5, margin_short=5)
 
 //=============================================================================
-// INPUTS - Risk Management (IMPORTANT!)
+// INPUTS - Risk Management (Margin + Leverage Based)
 //=============================================================================
 grp_risk = "Risk Management"
-i_risk_pct      = input.float(2.0, "Risk % per Trade", minval=0.5, maxval=10, step=0.5, group=grp_risk, tooltip="Max loss per trade as % of equity. SL hit = this % loss.")
-i_max_leverage  = input.float(20.0, "Max Leverage", minval=1, maxval=50, step=1, group=grp_risk, tooltip="Cap leverage to prevent margin calls")
+i_margin_pct    = input.float(4.0, "Margin % of Equity", minval=1, maxval=20, step=0.5, group=grp_risk, tooltip="How much of equity to use as margin (e.g., 4%)")
+i_sl_loss_pct   = input.float(50.0, "SL Loss % of Position", minval=10, maxval=90, step=5, group=grp_risk, tooltip="At SL, lose this % of position (e.g., 50%). Max equity loss = Margin% × SL Loss%")
+i_max_leverage  = input.float(50.0, "Max Leverage", minval=5, maxval=125, step=5, group=grp_risk, tooltip="Cap leverage (Bybit max is usually 50-125x)")
 i_direction     = input.string("Both", "Trade Direction", options=["Long", "Short", "Both"], group=grp_risk)
+
+// Calculated: Max equity loss per trade = Margin% × SL Loss% = 4% × 50% = 2%
 
 //=============================================================================
 // INPUTS - Strategy Settings (Scalping Optimized)
@@ -113,37 +116,55 @@ inTradingHours() =>
         true
 
 //=============================================================================
-// POSITION SIZE CALCULATION (Risk-Based)
+// POSITION SIZE CALCULATION (Margin + Dynamic Leverage)
 //=============================================================================
-// Formula: position_size = (equity * risk%) / (entry - sl)
-// This ensures SL hit = exactly risk% loss
+// User sets: Margin % (e.g., 4%) and SL Loss % (e.g., 50%)
+// System calculates: Leverage needed so that SL hit = Margin% × SL Loss% of equity
+//
+// Example: Margin=4%, SL Loss=50%, Equity=$1000
+// - Margin used: $40
+// - Max loss at SL: $40 × 50% = $20 = 2% of equity
+// - If SL is 1% from entry → need 50x leverage
+// - If SL is 2% from entry → need 25x leverage
 
 calcPositionSize(float entry_price, float sl_price) =>
-    // Calculate risk amount in currency
     equity = strategy.equity
-    risk_amount = equity * (i_risk_pct / 100)
 
-    // Calculate SL distance in price
+    // Fixed margin amount
+    margin = equity * (i_margin_pct / 100)
+
+    // Calculate SL distance as % of entry
     sl_distance = math.abs(entry_price - sl_price)
+    sl_distance_pct = sl_distance / entry_price * 100
 
-    // Calculate position size (in units/contracts)
-    qty = sl_distance > 0 ? risk_amount / sl_distance : 0
+    // Calculate required leverage to achieve target SL loss %
+    // Formula: sl_distance_pct × leverage = i_sl_loss_pct
+    // So: leverage = i_sl_loss_pct / sl_distance_pct
+    required_leverage = sl_distance_pct > 0 ? i_sl_loss_pct / sl_distance_pct : 0
 
-    // Calculate position value and leverage
-    position_value = qty * entry_price
-    leverage = position_value / equity
+    // Cap leverage at max
+    leverage = math.min(required_leverage, i_max_leverage)
 
-    // Cap leverage if too high
-    if leverage > i_max_leverage
-        qty := (equity * i_max_leverage) / entry_price
-        leverage := i_max_leverage
+    // If capped, the actual SL loss % will be lower (safer)
+    actual_sl_loss_pct = sl_distance_pct * leverage
 
-    [qty, leverage, position_value]
+    // Calculate position value and quantity
+    position_value = margin * leverage
+    qty = position_value / entry_price
+
+    // Calculate actual risk in currency (for display)
+    // risk_amount = margin × actual_sl_loss_pct / 100
+    risk_amount = margin * (actual_sl_loss_pct / 100)
+
+    [qty, leverage, position_value, margin, actual_sl_loss_pct, risk_amount]
 
 // Track calculated values for display
 var float active_qty = na
 var float active_leverage = na
 var float active_position_value = na
+var float active_margin = na
+var float active_sl_loss_pct = na
+var float active_risk_amount = na
 
 //=============================================================================
 // MTF TREND DETECTION
@@ -386,8 +407,8 @@ if array.size(bull_ob_top) > 0 and strategy.position_size == 0
                 bull_tp1 := bull_entry + (sl_dist * i_tp1_rr)  // TP1 at RR
                 bull_tp2 := bull_entry + (sl_dist * i_tp2_rr)  // TP2 at RR
 
-                // Calculate position size based on risk
-                [qty, lev, pos_val] = calcPositionSize(bull_entry, bull_sl)
+                // Calculate position size based on margin + dynamic leverage
+                [qty, lev, pos_val, margin, sl_loss, risk_amt] = calcPositionSize(bull_entry, bull_sl)
                 bull_qty := qty
                 break
 
@@ -439,8 +460,8 @@ if array.size(bear_ob_top) > 0 and strategy.position_size == 0
                 bear_tp1 := bear_entry - (sl_dist * i_tp1_rr)  // TP1 at RR
                 bear_tp2 := bear_entry - (sl_dist * i_tp2_rr)  // TP2 at RR
 
-                // Calculate position size based on risk
-                [qty, lev, pos_val] = calcPositionSize(bear_entry, bear_sl)
+                // Calculate position size based on margin + dynamic leverage
+                [qty, lev, pos_val, margin, sl_loss, risk_amt] = calcPositionSize(bear_entry, bear_sl)
                 bear_qty := qty
                 break
 
@@ -486,10 +507,14 @@ if long_condition and bull_qty > 0
     tp1_taken := false
     is_long := true
 
-    // Store for display
+    // Store for display - recalculate to get all values
+    [q, lev, pos_val, marg, sl_loss, risk_amt] = calcPositionSize(bull_entry, bull_sl)
     active_qty := bull_qty
-    active_leverage := (bull_qty * bull_entry) / strategy.equity
-    active_position_value := bull_qty * bull_entry
+    active_leverage := lev
+    active_position_value := pos_val
+    active_margin := marg
+    active_sl_loss_pct := sl_loss
+    active_risk_amount := risk_amt
 
     // Remove used OB
     if active_bull_ob_idx >= 0 and active_bull_ob_idx < array.size(bull_ob_top)
@@ -508,10 +533,14 @@ if short_condition and bear_qty > 0
     tp1_taken := false
     is_long := false
 
-    // Store for display
+    // Store for display - recalculate to get all values
+    [q, lev, pos_val, marg, sl_loss, risk_amt] = calcPositionSize(bear_entry, bear_sl)
     active_qty := bear_qty
-    active_leverage := (bear_qty * bear_entry) / strategy.equity
-    active_position_value := bear_qty * bear_entry
+    active_leverage := lev
+    active_position_value := pos_val
+    active_margin := marg
+    active_sl_loss_pct := sl_loss
+    active_risk_amount := risk_amt
 
     // Remove used OB
     if active_bear_ob_idx >= 0 and active_bear_ob_idx < array.size(bear_ob_top)
@@ -582,6 +611,9 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0
     active_qty := na
     active_leverage := na
     active_position_value := na
+    active_margin := na
+    active_sl_loss_pct := na
+    active_risk_amount := na
 
 //=============================================================================
 // VISUALS - Order Block Boxes with Labels
@@ -658,89 +690,101 @@ plot(strategy.position_size != 0 ? active_tp2 : na, "TP2", color=color.lime, sty
 plot(strategy.position_size != 0 ? active_entry : na, "Entry", color=color.blue, style=plot.style_linebr, linewidth=1)
 
 //=============================================================================
-// INFO TABLE - Shows Risk, Leverage, Position Details with Trade Levels
+// INFO TABLE - Shows Margin, Leverage, Position Details (Futures Style)
 //=============================================================================
-var table infoTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1)
+var table infoTable = table.new(position.top_right, 2, 14, bgcolor=color.new(color.black, 80), border_width=1)
+
+// Calculate max equity loss (Margin% × SL Loss%)
+max_equity_loss_pct = i_margin_pct * i_sl_loss_pct / 100
 
 if barstate.islast
     // Headers
-    table.cell(infoTable, 0, 0, "Parameter", text_color=color.white, text_size=size.small)
-    table.cell(infoTable, 1, 0, "Value", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 0, 0, "RISK SETTINGS", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, "", text_color=color.white, text_size=size.small)
 
-    // Risk % Setting
-    table.cell(infoTable, 0, 1, "Risk Setting", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 1, str.tostring(i_risk_pct, "#.#") + "% of Equity", text_color=color.yellow, text_size=size.small)
+    // Margin Setting
+    table.cell(infoTable, 0, 1, "Margin %", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(i_margin_pct, "#.#") + "% ($" + str.tostring(strategy.equity * i_margin_pct / 100, "#.##") + ")", text_color=color.yellow, text_size=size.small)
 
-    // Current Equity
-    table.cell(infoTable, 0, 2, "Equity", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 2, "$" + str.tostring(strategy.equity, "#.##"), text_color=color.white, text_size=size.small)
+    // SL Loss Setting
+    table.cell(infoTable, 0, 2, "SL Loss %", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(i_sl_loss_pct, "#") + "% of Position", text_color=color.orange, text_size=size.small)
+
+    // Max Equity Loss (calculated)
+    table.cell(infoTable, 0, 3, "Max Loss/Trade", text_color=color.gray, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(max_equity_loss_pct, "#.#") + "% ($" + str.tostring(strategy.equity * max_equity_loss_pct / 100, "#.##") + ")", text_color=color.red, text_size=size.small)
 
     // Current Position Info (only when in trade)
     if strategy.position_size != 0
-        // Direction
-        table.cell(infoTable, 0, 3, "Direction", text_color=color.gray, text_size=size.small)
+        // Separator
+        table.cell(infoTable, 0, 4, "ACTIVE TRADE", text_color=color.white, text_size=size.small)
         dir_text = is_long ? "LONG ▲" : "SHORT ▼"
         dir_color = is_long ? color.green : color.red
-        table.cell(infoTable, 1, 3, dir_text, text_color=dir_color, text_size=size.small)
+        table.cell(infoTable, 1, 4, dir_text, text_color=dir_color, text_size=size.small)
 
         // Entry Price
-        table.cell(infoTable, 0, 4, "Entry", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 4, str.tostring(active_entry, "#.####"), text_color=color.blue, text_size=size.small)
+        table.cell(infoTable, 0, 5, "Entry", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 5, str.tostring(active_entry, "#.####"), text_color=color.blue, text_size=size.small)
 
         // Stop Loss
-        table.cell(infoTable, 0, 5, tp1_taken ? "BE (SL)" : "Stop Loss", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 0, 6, tp1_taken ? "BE (SL)" : "Stop Loss", text_color=color.gray, text_size=size.small)
         sl_color = tp1_taken ? color.orange : color.red
-        table.cell(infoTable, 1, 5, str.tostring(current_sl, "#.####"), text_color=sl_color, text_size=size.small)
+        table.cell(infoTable, 1, 6, str.tostring(current_sl, "#.####"), text_color=sl_color, text_size=size.small)
 
-        // Risk Amount (what you lose if SL hit)
-        sl_dist_pct = math.abs(active_entry - current_sl) / active_entry * 100
-        risk_amount = active_qty * math.abs(active_entry - current_sl)
-        table.cell(infoTable, 0, 6, "SL Loss", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 6, "$" + str.tostring(risk_amount, "#.##") + " (" + str.tostring(risk_amount / strategy.equity * 100, "#.#") + "%)", text_color=color.red, text_size=size.small)
+        // Actual SL Loss (in $ and % of equity)
+        actual_risk = active_qty * math.abs(active_entry - current_sl)
+        actual_risk_pct = actual_risk / strategy.equity * 100
+        table.cell(infoTable, 0, 7, "SL Hit =", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 7, "-$" + str.tostring(actual_risk, "#.##") + " (-" + str.tostring(actual_risk_pct, "#.#") + "%)", text_color=color.red, text_size=size.small)
 
         // TP1
-        table.cell(infoTable, 0, 7, "TP1 (" + str.tostring(i_tp1_rr, "#.#") + "R)", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 0, 8, "TP1 (" + str.tostring(i_tp1_rr, "#.#") + "R)", text_color=color.gray, text_size=size.small)
         tp1_text = tp1_taken ? "FILLED ✓" : str.tostring(active_tp1, "#.####")
         tp1_color = tp1_taken ? color.green : color.lime
-        table.cell(infoTable, 1, 7, tp1_text, text_color=tp1_color, text_size=size.small)
+        table.cell(infoTable, 1, 8, tp1_text, text_color=tp1_color, text_size=size.small)
 
         // TP2
-        table.cell(infoTable, 0, 8, "TP2 (" + str.tostring(i_tp2_rr, "#.#") + "R)", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 8, str.tostring(active_tp2, "#.####"), text_color=color.lime, text_size=size.small)
+        table.cell(infoTable, 0, 9, "TP2 (" + str.tostring(i_tp2_rr, "#.#") + "R)", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 9, str.tostring(active_tp2, "#.####"), text_color=color.lime, text_size=size.small)
+
+        // Margin Used
+        table.cell(infoTable, 0, 10, "Margin Used", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 10, "$" + str.tostring(active_margin, "#.##"), text_color=color.yellow, text_size=size.small)
 
         // Position Value & Leverage
-        table.cell(infoTable, 0, 9, "Pos Value", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 9, "$" + str.tostring(active_position_value, "#.##"), text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 0, 11, "Pos Value", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 11, "$" + str.tostring(active_position_value, "#.##"), text_color=color.white, text_size=size.small)
 
-        table.cell(infoTable, 0, 10, "Leverage", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 0, 12, "Leverage", text_color=color.gray, text_size=size.small)
         lev_color = active_leverage > i_max_leverage * 0.8 ? color.red : color.green
-        table.cell(infoTable, 1, 10, str.tostring(active_leverage, "#.##") + "x", text_color=lev_color, text_size=size.small)
+        table.cell(infoTable, 1, 12, str.tostring(active_leverage, "#.#") + "x", text_color=lev_color, text_size=size.small)
 
         // TP1 Status
-        table.cell(infoTable, 0, 11, "TP1 Status", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 0, 13, "TP1 Status", text_color=color.gray, text_size=size.small)
         tp1_status = tp1_taken ? "50% CLOSED" : "PENDING"
-        table.cell(infoTable, 1, 11, tp1_status, text_color=tp1_taken ? color.green : color.orange, text_size=size.small)
+        table.cell(infoTable, 1, 13, tp1_status, text_color=tp1_taken ? color.green : color.orange, text_size=size.small)
     else
-        table.cell(infoTable, 0, 3, "Position", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 3, "FLAT", text_color=color.gray, text_size=size.small)
+        // Separator
+        table.cell(infoTable, 0, 4, "STATUS", text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 1, 4, "FLAT", text_color=color.gray, text_size=size.small)
 
-        // Max Risk per Trade
-        table.cell(infoTable, 0, 4, "Max Risk/Trade", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 4, "$" + str.tostring(strategy.equity * i_risk_pct / 100, "#.##"), text_color=color.yellow, text_size=size.small)
+        // Equity
+        table.cell(infoTable, 0, 5, "Equity", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 5, "$" + str.tostring(strategy.equity, "#.##"), text_color=color.white, text_size=size.small)
 
         // Show pending OBs count
-        table.cell(infoTable, 0, 5, "Bull OBs", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 5, str.tostring(array.size(bull_ob_top)), text_color=color.green, text_size=size.small)
+        table.cell(infoTable, 0, 6, "Bull OBs", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 6, str.tostring(array.size(bull_ob_top)), text_color=color.green, text_size=size.small)
 
-        table.cell(infoTable, 0, 6, "Bear OBs", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 6, str.tostring(array.size(bear_ob_top)), text_color=color.red, text_size=size.small)
+        table.cell(infoTable, 0, 7, "Bear OBs", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 7, str.tostring(array.size(bear_ob_top)), text_color=color.red, text_size=size.small)
 
         // Max Leverage Setting
-        table.cell(infoTable, 0, 7, "Max Leverage", text_color=color.gray, text_size=size.small)
-        table.cell(infoTable, 1, 7, str.tostring(i_max_leverage, "#") + "x", text_color=color.white, text_size=size.small)
+        table.cell(infoTable, 0, 8, "Max Leverage", text_color=color.gray, text_size=size.small)
+        table.cell(infoTable, 1, 8, str.tostring(i_max_leverage, "#") + "x", text_color=color.white, text_size=size.small)
 
         // Clear remaining rows
-        for row = 8 to 11
+        for row = 9 to 13
             table.cell(infoTable, 0, row, "", text_color=color.gray, text_size=size.small)
             table.cell(infoTable, 1, row, "", text_color=color.gray, text_size=size.small)
 
