@@ -1,166 +1,205 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
-// SMC Scalper Pro - FVG + OB with MTF Bias
+// SMC Scalper Pro - FVG + OB with MTF Bias (based on QuantAlgo style)
 //@version=6
-strategy("SMC Scalper Pro", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06)
+strategy("SMC Scalper Pro", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.06, process_orders_on_close=true)
 
 //=============================================================================
 // INPUTS
 //=============================================================================
-i_bias_mult     = input.int(3, "Bias TF Multiplier", minval=2, maxval=10)
-i_ema_fast      = input.int(21, "Fast EMA", minval=5, maxval=50)
-i_ema_slow      = input.int(50, "Slow EMA", minval=20, maxval=200)
-i_require_bias  = input.bool(false, "Require Bias")
+grp_bias = "Bias Settings"
+i_bias_mult     = input.int(3, "Bias TF Multiplier", minval=2, maxval=10, group=grp_bias)
+i_ema_fast      = input.int(21, "Fast EMA", minval=5, maxval=50, group=grp_bias)
+i_ema_slow      = input.int(50, "Slow EMA", minval=20, maxval=200, group=grp_bias)
+i_require_bias  = input.bool(false, "Require Bias Alignment", group=grp_bias)
 
-i_use_fvg       = input.bool(true, "Use FVG")
-i_use_ob        = input.bool(true, "Use OB")
+grp_poi = "POI Detection"
+i_use_fvg       = input.bool(true, "Use FVG", group=grp_poi)
+i_use_ob        = input.bool(true, "Use OB", group=grp_poi)
 
-i_sl_pct        = input.float(1.0, "SL %", minval=0.1, maxval=5.0, step=0.1)
-i_tp_rr         = input.float(1.2, "TP RR", minval=0.5, maxval=5.0, step=0.1)
+grp_risk = "Risk Management"
+i_sl_pct        = input.float(1.0, "SL %", minval=0.1, maxval=5.0, step=0.1, group=grp_risk)
+i_tp_rr         = input.float(1.5, "TP Risk:Reward", minval=0.5, maxval=5.0, step=0.1, group=grp_risk)
 
-i_show_table    = input.bool(true, "Show Table")
+grp_display = "Display"
+i_show_table    = input.bool(true, "Show Performance Table", group=grp_display)
 
 //=============================================================================
-// TIMEFRAME
+// TIMEFRAME CALCULATION
 //=============================================================================
 tfMins = timeframe.isminutes ? timeframe.multiplier : timeframe.isdaily ? 1440 : 60
 biasTF = tfMins * i_bias_mult
 biasTFStr = biasTF < 60 ? str.tostring(biasTF) : str.tostring(biasTF/60) + "H"
 
 //=============================================================================
-// MTF BIAS
+// MTF BIAS (Higher Timeframe Trend)
 //=============================================================================
-[emaF, emaS] = request.security(syminfo.tickerid, biasTFStr, [ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)])
-bias = emaF > emaS ? 1 : emaF < emaS ? -1 : 0
-biasStr = bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL"
+[htfEmaFast, htfEmaSlow] = request.security(syminfo.tickerid, biasTFStr, [ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow)], lookahead=barmerge.lookahead_off)
+bias = htfEmaFast > htfEmaSlow ? 1 : htfEmaFast < htfEmaSlow ? -1 : 0
+biasStr = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
 
 //=============================================================================
-// FVG DETECTION - Simple approach: just detect and immediately trade
+// FVG DETECTION (Fair Value Gap)
 //=============================================================================
-bullFvg = i_use_fvg and low > high[2]
-bearFvg = i_use_fvg and high < low[2]
+bullFvg = i_use_fvg and low > high[2]  // Gap up: current low above 2-bars-ago high
+bearFvg = i_use_fvg and high < low[2]  // Gap down: current high below 2-bars-ago low
 
 //=============================================================================
-// OB DETECTION
+// OB DETECTION (Order Block - simplified)
 //=============================================================================
 atr = ta.atr(14)
+// Bullish OB: Current bullish engulfs previous bearish candle
 bullOb = i_use_ob and close > open and (close - open) > atr * 0.3 and close[1] < open[1]
+// Bearish OB: Current bearish engulfs previous bullish candle
 bearOb = i_use_ob and close < open and (open - close) > atr * 0.3 and close[1] > open[1]
 
 //=============================================================================
-// ENTRY SIGNALS - Direct entry on detection, no zone storage
+// ENTRY SIGNALS
 //=============================================================================
-longSignal = (bullFvg or bullOb) and strategy.position_size == 0 and (not i_require_bias or bias >= 0)
-shortSignal = (bearFvg or bearOb) and strategy.position_size == 0 and (not i_require_bias or bias <= 0)
+// Long: FVG or OB detected + bias filter (if enabled)
+longSignal = (bullFvg or bullOb) and strategy.position_size == 0
+if i_require_bias
+    longSignal := longSignal and bias >= 0
+
+// Short: FVG or OB detected + bias filter (if enabled)
+shortSignal = (bearFvg or bearOb) and strategy.position_size == 0
+if i_require_bias
+    shortSignal := shortSignal and bias <= 0
 
 //=============================================================================
-// POSITION TRACKING
+// POSITION STATE TRACKING
 //=============================================================================
-var float myEntry = na
-var float mySL = na
-var float myTP = na
-var bool inLong = false
-var bool inShort = false
+var float active_entry = na
+var float active_sl = na
+var float active_tp = na
 
-// Entry
-if longSignal and not inLong and not inShort
-    myEntry := close
-    mySL := close * (1 - i_sl_pct/100)
-    myTP := close * (1 + i_sl_pct/100 * i_tp_rr)
-    inLong := true
-    strategy.entry("L", strategy.long)
+//=============================================================================
+// ENTRIES
+//=============================================================================
+if longSignal
+    active_entry := close
+    sl_distance = close * (i_sl_pct / 100)
+    active_sl := close - sl_distance
+    active_tp := close + (sl_distance * i_tp_rr)
+    strategy.entry("Long", strategy.long)
 
-if shortSignal and not inLong and not inShort
-    myEntry := close
-    mySL := close * (1 + i_sl_pct/100)
-    myTP := close * (1 - i_sl_pct/100 * i_tp_rr)
-    inShort := true
-    strategy.entry("S", strategy.short)
+if shortSignal
+    active_entry := close
+    sl_distance = close * (i_sl_pct / 100)
+    active_sl := close + sl_distance
+    active_tp := close - (sl_distance * i_tp_rr)
+    strategy.entry("Short", strategy.short)
 
-// Exit Logic - Check EVERY bar
-if inLong
-    // TP Hit
-    if high >= myTP
-        strategy.close("L", comment="TP")
-        inLong := false
-        myEntry := na
-    // SL Hit
-    else if low <= mySL
-        strategy.close("L", comment="SL")
-        inLong := false
-        myEntry := na
+//=============================================================================
+// EXIT LOGIC - Using limit= and stop= (PRICE LEVELS, not ticks!)
+// This is the correct way - same as smc_ob_strategy.pine
+//=============================================================================
+if strategy.position_size > 0
+    // Long position: TP above, SL below
+    strategy.exit("Exit_L", "Long", limit=active_tp, stop=active_sl, comment="TP/SL")
 
-if inShort
-    // TP Hit
-    if low <= myTP
-        strategy.close("S", comment="TP")
-        inShort := false
-        myEntry := na
-    // SL Hit
-    else if high >= mySL
-        strategy.close("S", comment="SL")
-        inShort := false
-        myEntry := na
+if strategy.position_size < 0
+    // Short position: TP below, SL above
+    strategy.exit("Exit_S", "Short", limit=active_tp, stop=active_sl, comment="TP/SL")
 
-// Safety reset if position closed externally
-if strategy.position_size == 0
-    if inLong or inShort
-        inLong := false
-        inShort := false
-        myEntry := na
-        mySL := na
-        myTP := na
+// Reset on position close
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    active_entry := na
+    active_sl := na
+    active_tp := na
 
 //=============================================================================
 // VISUALS
 //=============================================================================
-plotshape(longSignal and not inLong[1], "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
-plotshape(shortSignal and not inShort[1], "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+// Entry signals
+plotshape(longSignal, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortSignal, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
 
-plot(inLong or inShort ? myEntry : na, "Entry", color.blue, 1, plot.style_linebr)
-plot(inLong or inShort ? myTP : na, "TP", color.green, 2, plot.style_linebr)
-plot(inLong or inShort ? mySL : na, "SL", color.red, 2, plot.style_linebr)
+// Active trade levels
+plot(strategy.position_size != 0 ? active_entry : na, "Entry", color.blue, 1, plot.style_linebr)
+plot(strategy.position_size != 0 ? active_tp : na, "TP", color.green, 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? active_sl : na, "SL", color.red, 2, plot.style_linebr)
+
+// Current TF EMAs for reference
+emaFastCurrent = ta.ema(close, i_ema_fast)
+emaSlowCurrent = ta.ema(close, i_ema_slow)
+plot(emaFastCurrent, "EMA Fast", color.new(color.blue, 70), 1)
+plot(emaSlowCurrent, "EMA Slow", color.new(color.orange, 70), 1)
 
 //=============================================================================
-// PERFORMANCE TABLE
+// PERFORMANCE TABLE (QuantAlgo Style)
 //=============================================================================
 if i_show_table and barstate.islast
-    var table t = table.new(position.top_right, 2, 10, color.new(color.black, 20), border_color=color.gray, border_width=1)
+    var table perfTable = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
 
+    // Calculate metrics
     wins = strategy.wintrades
     losses = strategy.losstrades
     total = strategy.closedtrades
-    wr = total > 0 ? wins/total*100 : 0
-    pf = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0
-    dd = strategy.max_drawdown / strategy.initial_capital * 100
-    np = strategy.netprofit
-    npPct = np / strategy.initial_capital * 100
+    winRate = total > 0 ? wins / total * 100 : 0
+    profitFactor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0
+    maxDD = strategy.max_drawdown / strategy.initial_capital * 100
+    netProfit = strategy.netprofit
+    netProfitPct = netProfit / strategy.initial_capital * 100
+    avgWin = wins > 0 ? strategy.grossprofit / wins : 0
+    avgLoss = losses > 0 ? math.abs(strategy.grossloss) / losses : 0
 
-    table.cell(t, 0, 0, "METRICS", text_color=color.white, bgcolor=color.gray)
-    table.cell(t, 1, 0, "VALUES", text_color=color.white, bgcolor=color.gray)
+    // Header
+    table.cell(perfTable, 0, 0, "SMC SCALPER PRO", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
+    table.cell(perfTable, 1, 0, "v1.0", text_color=color.white, bgcolor=color.new(color.blue, 50), text_size=size.small)
 
-    table.cell(t, 0, 1, "Bias", text_color=color.gray)
-    table.cell(t, 1, 1, biasStr, text_color=bias==1?color.green:bias==-1?color.red:color.gray)
+    // Bias TF
+    table.cell(perfTable, 0, 1, "Bias TF", text_color=color.gray, text_size=size.small)
+    table.cell(perfTable, 1, 1, biasTFStr, text_color=color.white, text_size=size.small)
 
-    table.cell(t, 0, 2, "Trades", text_color=color.gray)
-    table.cell(t, 1, 2, str.tostring(total), text_color=color.white)
+    // Current Bias
+    table.cell(perfTable, 0, 2, "Bias", text_color=color.gray, text_size=size.small)
+    biasColor = bias == 1 ? color.green : bias == -1 ? color.red : color.gray
+    table.cell(perfTable, 1, 2, biasStr, text_color=biasColor, text_size=size.small)
 
-    table.cell(t, 0, 3, "W / L", text_color=color.gray)
-    table.cell(t, 1, 3, str.tostring(wins) + " / " + str.tostring(losses), text_color=color.white)
+    // Total Trades
+    table.cell(perfTable, 0, 3, "Total Trades", text_color=color.gray, text_size=size.small)
+    table.cell(perfTable, 1, 3, str.tostring(total), text_color=color.white, text_size=size.small)
 
-    table.cell(t, 0, 4, "Win Rate", text_color=color.gray)
-    table.cell(t, 1, 4, str.tostring(wr, "#.#") + "%", text_color=wr>=55?color.green:wr>=45?color.yellow:color.red)
+    // Wins / Losses
+    table.cell(perfTable, 0, 4, "W / L", text_color=color.gray, text_size=size.small)
+    table.cell(perfTable, 1, 4, str.tostring(wins) + " / " + str.tostring(losses), text_color=color.white, text_size=size.small)
 
-    table.cell(t, 0, 5, "Profit Factor", text_color=color.gray)
-    table.cell(t, 1, 5, str.tostring(pf, "#.##"), text_color=pf>=1.5?color.green:pf>=1?color.yellow:color.red)
+    // Win Rate
+    table.cell(perfTable, 0, 5, "Win Rate", text_color=color.gray, text_size=size.small)
+    wrColor = winRate >= 55 ? color.green : winRate >= 45 ? color.yellow : color.red
+    table.cell(perfTable, 1, 5, str.tostring(winRate, "#.#") + "%", text_color=wrColor, text_size=size.small)
 
-    table.cell(t, 0, 6, "Max DD", text_color=color.gray)
-    table.cell(t, 1, 6, str.tostring(dd, "#.#") + "%", text_color=color.red)
+    // Profit Factor
+    table.cell(perfTable, 0, 6, "Profit Factor", text_color=color.gray, text_size=size.small)
+    pfColor = profitFactor >= 1.5 ? color.green : profitFactor >= 1.0 ? color.yellow : color.red
+    table.cell(perfTable, 1, 6, str.tostring(profitFactor, "#.##"), text_color=pfColor, text_size=size.small)
 
-    table.cell(t, 0, 7, "SL/TP", text_color=color.gray)
-    table.cell(t, 1, 7, str.tostring(i_sl_pct,"#.#") + "% / " + str.tostring(i_sl_pct*i_tp_rr,"#.#") + "%", text_color=color.aqua)
+    // Max Drawdown
+    table.cell(perfTable, 0, 7, "Max DD", text_color=color.gray, text_size=size.small)
+    table.cell(perfTable, 1, 7, str.tostring(maxDD, "#.#") + "%", text_color=color.red, text_size=size.small)
 
-    table.cell(t, 0, 8, "Net Profit", text_color=color.gray)
-    table.cell(t, 1, 8, str.tostring(npPct, "#.#") + "%", text_color=np>=0?color.green:color.red)
+    // SL / TP Settings
+    tpPct = i_sl_pct * i_tp_rr
+    table.cell(perfTable, 0, 8, "SL / TP", text_color=color.gray, text_size=size.small)
+    table.cell(perfTable, 1, 8, str.tostring(i_sl_pct, "#.#") + "% / " + str.tostring(tpPct, "#.#") + "%", text_color=color.aqua, text_size=size.small)
 
-    table.cell(t, 0, 9, "Bars", text_color=color.gray)
-    table.cell(t, 1, 9, str.tostring(bar_index), text_color=color.white)
+    // RR
+    table.cell(perfTable, 0, 9, "Risk:Reward", text_color=color.gray, text_size=size.small)
+    table.cell(perfTable, 1, 9, "1:" + str.tostring(i_tp_rr, "#.#"), text_color=color.aqua, text_size=size.small)
+
+    // Net Profit
+    table.cell(perfTable, 0, 10, "Net Profit", text_color=color.gray, text_size=size.small)
+    npColor = netProfit >= 0 ? color.green : color.red
+    table.cell(perfTable, 1, 10, str.tostring(netProfitPct, "#.#") + "%", text_color=npColor, text_size=size.small)
+
+    // Status
+    table.cell(perfTable, 0, 11, "Status", text_color=color.gray, text_size=size.small)
+    posStatus = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(perfTable, 1, 11, posStatus, text_color=posColor, text_size=size.small)
+
+//=============================================================================
+// ALERTS
+//=============================================================================
+alertcondition(longSignal, title="Long Entry", message="SMC Scalper: Long Signal")
+alertcondition(shortSignal, title="Short Entry", message="SMC Scalper: Short Signal")
