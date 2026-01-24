@@ -254,7 +254,8 @@ var array<float> bear_ob_strength = array.new_float(0)
 // Calculate OB strength - now checks for impulsive move AFTER the OB candle
 calcOBStrength(int ob_idx) =>
     // Check if the move after OB was impulsive (big candle, high volume)
-    if ob_idx > 0
+    // IMPORTANT: Add bounds check to avoid historical buffer error
+    if ob_idx > 0 and ob_idx < 290
         // The candle after OB should be impulsive
         impulse_candle_size = math.abs(close[ob_idx - 1] - open[ob_idx - 1])
         avg_candle_size = ta.sma(math.abs(close - open), 20)
@@ -287,73 +288,81 @@ if bull_break and not na(last_swing_low_bar)
     // Calculate how many bars ago the swing LOW was formed (that's where the impulse started)
     bars_since_swing = bar_index - last_swing_low_bar
 
-    // Find the LAST BEARISH CANDLE before the swing low (this is the real OB!)
-    ob_found = false
-    ob_idx = 0
+    // IMPORTANT: Cap at 250 to avoid "historical buffer limit" error (max is 300)
+    // Skip if swing is too old
+    if bars_since_swing > 0 and bars_since_swing < 250
+        // Find the LAST BEARISH CANDLE before the swing low (this is the real OB!)
+        ob_found = false
+        ob_idx = 0
 
-    // Start from the swing low and look backwards (max 20 bars before swing)
-    // The OB is the candle that "loaded up" before the impulse move
-    for i = bars_since_swing to math.min(bars_since_swing + 20, 50)
-        if i > 0 and isBearishCandle(i) and not ob_found
-            ob_idx := i
-            ob_found := true
-            break
+        // Start from the swing low and look backwards (max 20 bars before swing)
+        // The OB is the candle that "loaded up" before the impulse move
+        max_lookback = math.min(bars_since_swing + 20, 280)
+        for i = bars_since_swing to max_lookback
+            if i > 0 and i < 290 and isBearishCandle(i) and not ob_found
+                ob_idx := i
+                ob_found := true
+                break
 
-    if ob_found and ob_idx > 0
-        // The Order Block is the BODY of the last bearish candle
-        ob_top = math.max(open[ob_idx], close[ob_idx])  // Body high (open for bearish)
-        ob_btm = low[ob_idx]  // Include the wick for SL
-        ob_str = calcOBStrength(ob_idx)
+        if ob_found and ob_idx > 0 and ob_idx < 290
+            // The Order Block is the BODY of the last bearish candle
+            ob_top = math.max(open[ob_idx], close[ob_idx])  // Body high (open for bearish)
+            ob_btm = low[ob_idx]  // Include the wick for SL
+            ob_str = calcOBStrength(ob_idx)
 
-        // Only add if OB is below current price (valid for retest entry)
-        if ob_str >= i_ob_strength and ob_top < close
-            array.unshift(bull_ob_top, ob_top)
-            array.unshift(bull_ob_btm, ob_btm)
-            array.unshift(bull_ob_bar, bar_index - ob_idx)
-            array.unshift(bull_ob_strength, ob_str)
+            // Only add if OB is below current price (valid for retest entry)
+            if ob_str >= i_ob_strength and ob_top < close
+                array.unshift(bull_ob_top, ob_top)
+                array.unshift(bull_ob_btm, ob_btm)
+                array.unshift(bull_ob_bar, bar_index - ob_idx)
+                array.unshift(bull_ob_strength, ob_str)
 
-            // Limit array size
-            if array.size(bull_ob_top) > i_ob_num
-                array.pop(bull_ob_top)
-                array.pop(bull_ob_btm)
-                array.pop(bull_ob_bar)
-                array.pop(bull_ob_strength)
+                // Limit array size
+                if array.size(bull_ob_top) > i_ob_num
+                    array.pop(bull_ob_top)
+                    array.pop(bull_ob_btm)
+                    array.pop(bull_ob_bar)
+                    array.pop(bull_ob_strength)
 
 // Create bearish OB on structure break (price breaks below swing low)
 if bear_break and not na(last_swing_high_bar)
     // Calculate how many bars ago the swing HIGH was formed (that's where the impulse started)
     bars_since_swing = bar_index - last_swing_high_bar
 
-    // Find the LAST BULLISH CANDLE before the swing high (this is the real OB!)
-    ob_found = false
-    ob_idx = 0
+    // IMPORTANT: Cap at 250 to avoid "historical buffer limit" error (max is 300)
+    // Skip if swing is too old
+    if bars_since_swing > 0 and bars_since_swing < 250
+        // Find the LAST BULLISH CANDLE before the swing high (this is the real OB!)
+        ob_found = false
+        ob_idx = 0
 
-    // Start from the swing high and look backwards (max 20 bars before swing)
-    for i = bars_since_swing to math.min(bars_since_swing + 20, 50)
-        if i > 0 and isBullishCandle(i) and not ob_found
-            ob_idx := i
-            ob_found := true
-            break
+        // Start from the swing high and look backwards (max 20 bars before swing)
+        max_lookback = math.min(bars_since_swing + 20, 280)
+        for i = bars_since_swing to max_lookback
+            if i > 0 and i < 290 and isBullishCandle(i) and not ob_found
+                ob_idx := i
+                ob_found := true
+                break
 
-    if ob_found and ob_idx > 0
-        // The Order Block is the BODY of the last bullish candle
-        ob_top = high[ob_idx]  // Include the wick for SL
-        ob_btm = math.min(open[ob_idx], close[ob_idx])  // Body low (open for bullish)
-        ob_str = calcOBStrength(ob_idx)
+        if ob_found and ob_idx > 0 and ob_idx < 290
+            // The Order Block is the BODY of the last bullish candle
+            ob_top = high[ob_idx]  // Include the wick for SL
+            ob_btm = math.min(open[ob_idx], close[ob_idx])  // Body low (open for bullish)
+            ob_str = calcOBStrength(ob_idx)
 
-        // Only add if OB is above current price (valid for retest entry)
-        if ob_str >= i_ob_strength and ob_btm > close
-            array.unshift(bear_ob_top, ob_top)
-            array.unshift(bear_ob_btm, ob_btm)
-            array.unshift(bear_ob_bar, bar_index - ob_idx)
-            array.unshift(bear_ob_strength, ob_str)
+            // Only add if OB is above current price (valid for retest entry)
+            if ob_str >= i_ob_strength and ob_btm > close
+                array.unshift(bear_ob_top, ob_top)
+                array.unshift(bear_ob_btm, ob_btm)
+                array.unshift(bear_ob_bar, bar_index - ob_idx)
+                array.unshift(bear_ob_strength, ob_str)
 
-            // Limit array size
-            if array.size(bear_ob_top) > i_ob_num
-                array.pop(bear_ob_top)
-                array.pop(bear_ob_btm)
-                array.pop(bear_ob_bar)
-                array.pop(bear_ob_strength)
+                // Limit array size
+                if array.size(bear_ob_top) > i_ob_num
+                    array.pop(bear_ob_top)
+                    array.pop(bear_ob_btm)
+                    array.pop(bear_ob_bar)
+                    array.pop(bear_ob_strength)
 
 //=============================================================================
 // ORDER BLOCK MITIGATION & ENTRY SIGNALS
