@@ -349,7 +349,13 @@ def run_scalper_live():
     trade_pairs = {}
 
     def on_order_update(message):
-        """Handle order fill events - move SL to BE after TP1 + SL safety check"""
+        """Handle order fill events - ENTRY fill detection + SL safety check
+
+        IMPORTANT: The order IDs we track (order1, order2) are ENTRY order IDs,
+        NOT TP order IDs! When entry fills, Bybit creates separate conditional
+        TP/SL orders with different IDs. TP detection is done via position
+        monitoring in the status loop, NOT here.
+        """
         try:
             if 'data' not in message:
                 return
@@ -358,6 +364,9 @@ def run_scalper_live():
                 order_id = order_data.get('orderId', '')
                 symbol = order_data.get('symbol', '')
                 status = order_data.get('orderStatus', '')
+                reduce_only = order_data.get('reduceOnly', False)
+                order_type = order_data.get('orderType', '')
+                side = order_data.get('side', '')
 
                 # Only care about filled orders
                 if status != 'Filled':
@@ -366,110 +375,138 @@ def run_scalper_live():
                 # === SAFETY: Check if position has SL after any fill ===
                 # Small delay to let the order settle
                 time.sleep(0.5)
-                has_sl, current_sl, entry_price, side = executor.check_position_has_sl(symbol)
-                if not has_sl and entry_price:
+                has_sl, current_sl, entry_price_pos, pos_side = executor.check_position_has_sl(symbol)
+                if not has_sl and entry_price_pos:
                     print(f"\n  [DANGER] {symbol} has NO SL! Setting emergency SL...", flush=True)
-                    executor.set_emergency_sl(symbol, entry_price, side, max_loss_pct=2.0)
+                    executor.set_emergency_sl(symbol, entry_price_pos, pos_side, max_loss_pct=2.0)
 
-                # Check if this is part of a trade pair
+                # Check if this is part of a tracked trade
                 if symbol not in trade_pairs:
                     continue
 
                 pair = trade_pairs[symbol]
 
-                # Check if TP1 order was filled (order1)
-                if order_id == pair.get('order1') and not pair.get('tp1_filled'):
-                    pair['tp1_filled'] = True
+                # === DETECT ENTRY FILLS ===
+                # Entry orders are NOT reduceOnly and match our tracked order IDs
+                is_entry_order = order_id in [pair.get('order1'), pair.get('order2')]
+
+                if is_entry_order and not reduce_only:
+                    # This is an ENTRY order filling, NOT a TP!
+                    if not pair.get('entry_filled'):
+                        pair['entry_filled'] = True
+                        pair['initial_qty'] = pair.get('qty', 0)
+                        print(f"\n  [ENTRY FILL] {symbol} - Position opened, tracking for TP/SL", flush=True)
+                    continue  # Don't process further - TP detection is done in status loop
+
+                # === DETECT TP/SL FILLS (reduceOnly orders) ===
+                # These are the actual TP/SL orders that Bybit created
+                if reduce_only and pair.get('entry_filled'):
+                    # Get current position to check what happened
+                    pos = executor.get_position(symbol)
                     entry_price = pair['entry']
                     direction = pair['direction']
 
-                    # Move SL to lock in tiny profit (0.1%) - exactly like backtest
-                    if direction == 'long':
-                        new_sl = entry_price * 1.001  # 0.1% above entry
-                    else:
-                        new_sl = entry_price * 0.999  # 0.1% below entry
+                    if pos is None:
+                        # Position fully closed - determine if TP2 or SL
+                        # Get the fill price from the order data
+                        fill_price = float(order_data.get('avgPrice', order_data.get('price', entry_price)))
+                        tp2_price = pair.get('tp2_price', entry_price)
+                        sl_price = pair.get('sl_price', entry_price)
 
-                    print(f"\n  [TP1 HIT] {symbol} - Moving SL to BE+ ({new_sl:.6f})", flush=True)
-
-                    # Move SL to lock in tiny profit for remaining position
-                    try:
-                        # Use set_trading_stop to modify position SL
-                        response = executor.client.set_trading_stop(
-                            category="linear",
-                            symbol=symbol,
-                            stopLoss=str(round(new_sl, 6)),
-                            slTriggerBy="LastPrice",
-                            positionIdx=0
-                        )
-                        if response['retCode'] == 0:
-                            print(f"  [BE+ SET] {symbol} SL → {new_sl:.6f} (0.1% locked)", flush=True)
-
-                            # Send TP1 Telegram alert
-                            tp1_price = pair.get('tp1_price', entry_price)
-                            if direction == 'long':
-                                partial_pnl = (tp1_price - entry_price) / entry_price * 100
-                            else:
-                                partial_pnl = (entry_price - tp1_price) / entry_price * 100
-                            tg.send_tp1_hit(symbol, direction, entry_price, tp1_price, partial_pnl)
+                        # Check if exit was near TP2 or SL
+                        if direction == 'long':
+                            near_tp2 = fill_price >= tp2_price * 0.998  # Within 0.2% of TP2
+                            near_sl = fill_price <= sl_price * 1.002
+                            pnl_pct = (fill_price - entry_price) / entry_price * 100
                         else:
-                            print(f"  [WARN] SL modify failed: {response.get('retMsg', 'unknown')}", flush=True)
-                    except Exception as e:
-                        print(f"  [ERR] SL modify: {str(e)[:50]}", flush=True)
+                            near_tp2 = fill_price <= tp2_price * 1.002
+                            near_sl = fill_price >= sl_price * 0.998
+                            pnl_pct = (entry_price - fill_price) / entry_price * 100
 
-                # Check if TP2 order was filled (order2) - trade complete
-                elif order_id == pair.get('order2'):
-                    print(f"\n  [TP2 HIT] {symbol} - Trade complete!", flush=True)
+                        if near_tp2 and pnl_pct > 0:
+                            print(f"\n  [TP2 HIT] {symbol} - Trade complete! PnL: {pnl_pct:.2f}%", flush=True)
+                            exit_reason = 'tp2'
+                            tp_hits = '2/2' if pair.get('tp1_filled') else '1/2'
+                        else:
+                            exit_type = 'be+' if pair.get('tp1_filled') else 'sl'
+                            print(f"\n  [{exit_type.upper()} HIT] {symbol} - Exit at {fill_price:.6f}, PnL: {pnl_pct:.2f}%", flush=True)
+                            exit_reason = exit_type
+                            tp_hits = '1/2' if pair.get('tp1_filled') else '0/2'
 
-                    # Log exit to Supabase
-                    if pair.get('db_trade_id'):
+                        # Log exit
+                        if pair.get('db_trade_id'):
+                            try:
+                                balance = executor.get_balance()
+                                equity_now = balance.get('available', 0)
+                                margin = pair.get('margin_used', 0)
+                                realized_pnl = margin * (pnl_pct / 100) if margin else 0
+
+                                trade_logger.log_exit(
+                                    trade_id=pair['db_trade_id'],
+                                    exit_price=fill_price,
+                                    exit_time=datetime.utcnow(),
+                                    exit_reason=exit_reason,
+                                    realized_pnl=realized_pnl,
+                                    equity_at_close=equity_now,
+                                    tp1_hit=pair.get('tp1_filled', False),
+                                    tp2_hit=(exit_reason == 'tp2'),
+                                    entry_time=pair.get('entry_time'),
+                                    margin_used=margin,
+                                )
+
+                                # Send Telegram alert
+                                duration_mins = None
+                                if pair.get('entry_time'):
+                                    duration_mins = int((datetime.utcnow() - pair['entry_time']).total_seconds() / 60)
+                                tg.send_trade_closed(
+                                    symbol=symbol,
+                                    direction=direction,
+                                    entry_price=entry_price,
+                                    exit_price=fill_price,
+                                    pnl_pct=pnl_pct,
+                                    exit_reason=exit_reason,
+                                    tp_hits=tp_hits,
+                                    duration_mins=duration_mins,
+                                )
+                            except Exception as e:
+                                print(f"  [DB ERR] {str(e)[:40]}", flush=True)
+
+                        del trade_pairs[symbol]
+
+                    elif pos.size < pair.get('initial_qty', 0) * 0.7 and not pair.get('tp1_filled'):
+                        # Position size reduced significantly - TP1 hit!
+                        pair['tp1_filled'] = True
+
+                        # Move SL to BE+ for remaining position
+                        if direction == 'long':
+                            new_sl = entry_price * 1.001  # 0.1% above entry
+                        else:
+                            new_sl = entry_price * 0.999  # 0.1% below entry
+
+                        print(f"\n  [TP1 HIT] {symbol} - Moving SL to BE+ ({new_sl:.6f})", flush=True)
+
                         try:
-                            balance = executor.get_balance()
-                            equity_now = balance.get('available', 0)
-
-                            # Calculate PnL (approximate)
-                            entry = pair['entry']
-                            tp2 = pair.get('tp2_price', entry)
-                            direction = pair['direction']
-                            margin = pair.get('margin_used', 0)
-
-                            if direction == 'long':
-                                pnl_pct = (tp2 - entry) / entry * 100
-                            else:
-                                pnl_pct = (entry - tp2) / entry * 100
-
-                            realized_pnl = margin * (pnl_pct / 100) * pair.get('qty', 0) / margin if margin else 0
-
-                            trade_logger.log_exit(
-                                trade_id=pair['db_trade_id'],
-                                exit_price=tp2,
-                                exit_time=datetime.utcnow(),
-                                exit_reason='tp2',
-                                realized_pnl=realized_pnl,
-                                equity_at_close=equity_now,
-                                tp1_hit=pair.get('tp1_filled', False),
-                                tp2_hit=True,
-                                entry_time=pair.get('entry_time'),
-                                margin_used=margin,
-                            )
-
-                            # Send Telegram close alert
-                            duration_mins = None
-                            if pair.get('entry_time'):
-                                duration_mins = int((datetime.utcnow() - pair['entry_time']).total_seconds() / 60)
-                            tg.send_trade_closed(
+                            response = executor.client.set_trading_stop(
+                                category="linear",
                                 symbol=symbol,
-                                direction=direction,
-                                entry_price=entry,
-                                exit_price=tp2,
-                                pnl_pct=pnl_pct,
-                                exit_reason='tp2',
-                                tp_hits='2/2' if pair.get('tp1_filled') else '1/2',
-                                duration_mins=duration_mins,
+                                stopLoss=str(round(new_sl, 6)),
+                                slTriggerBy="LastPrice",
+                                positionIdx=0
                             )
-                        except Exception as e:
-                            print(f"  [DB ERR] {str(e)[:40]}", flush=True)
+                            if response['retCode'] == 0:
+                                print(f"  [BE+ SET] {symbol} SL → {new_sl:.6f} (0.1% locked)", flush=True)
 
-                    del trade_pairs[symbol]
+                                # Send TP1 Telegram alert
+                                tp1_price = pair.get('tp1_price', entry_price)
+                                if direction == 'long':
+                                    partial_pnl = (tp1_price - entry_price) / entry_price * 100
+                                else:
+                                    partial_pnl = (entry_price - tp1_price) / entry_price * 100
+                                tg.send_tp1_hit(symbol, direction, entry_price, tp1_price, partial_pnl)
+                            else:
+                                print(f"  [WARN] SL modify failed: {response.get('retMsg', 'unknown')}", flush=True)
+                        except Exception as e:
+                            print(f"  [ERR] SL modify: {str(e)[:50]}", flush=True)
 
         except Exception as e:
             print(f"  [WS ERR] {str(e)[:50]}", flush=True)
@@ -646,11 +683,12 @@ def run_scalper_live():
                             # Mark this OB as used so we don't trade it again!
                             if 'ob_key' in info:
                                 used_obs.add(info['ob_key'])
-                            # Mark trade as filled for exit detection
+                            # Mark trade entry as filled for exit detection
                             sym = info['symbol']
                             if sym in trade_pairs:
-                                trade_pairs[sym]['filled'] = True
-                                # Send Telegram notification ONLY when order is filled
+                                trade_pairs[sym]['entry_filled'] = True
+                                trade_pairs[sym]['initial_qty'] = trade_pairs[sym].get('qty', 0)
+                                # Send Telegram notification ONLY when entry order is filled
                                 if not trade_pairs[sym].get('tg_notified', False):
                                     trade_pairs[sym]['tg_notified'] = True
                                     pair = trade_pairs[sym]
@@ -664,7 +702,7 @@ def run_scalper_live():
                                         leverage=pair.get('leverage', 5),
                                         risk_pct=RISK_PER_TRADE_PCT,
                                     )
-                            print(f"  [FILLED] {info['symbol']} {info['direction'].upper()}!", flush=True)
+                            print(f"  [ENTRY FILL] {info['symbol']} {info['direction'].upper()}!", flush=True)
 
                 # Show status
                 positions = executor.get_all_positions()
@@ -676,16 +714,17 @@ def run_scalper_live():
                 for sym in list(trade_pairs.keys()):
                     pair = trade_pairs[sym]
 
-                    # Skip if orders for this symbol are still pending (not filled yet)
-                    if not pair.get('filled', False):
+                    # Skip if entry orders for this symbol are still pending (not filled yet)
+                    if not pair.get('entry_filled', False):
                         # Check if any pending orders exist for this symbol
                         has_pending = any(o['symbol'] == sym for o in pending_orders.values())
                         if has_pending:
-                            continue  # Still waiting for fill, not a real exit
-                        # If no pending orders and no position, mark as filled (order filled and position exists somewhere)
+                            continue  # Still waiting for entry fill
+                        # If no pending orders and position exists, mark entry as filled
                         if sym in position_symbols:
-                            pair['filled'] = True
-                            print(f"  [FILLED] {sym} position detected, tracking for exit", flush=True)
+                            pair['entry_filled'] = True
+                            pair['initial_qty'] = pair.get('qty', 0)
+                            print(f"  [ENTRY FILL] {sym} position detected, tracking for TP/SL", flush=True)
                         continue  # Either way, don't trigger exit yet
 
                     if sym not in position_symbols:
@@ -1013,22 +1052,24 @@ def run_scalper_live():
                                             # See fill detection section for tg.send_trade_opened()
 
                                             trade_pairs[signal.symbol] = {
-                                                'order1': oid1,  # TP1 order
-                                                'order2': oid2,  # TP2 order
+                                                'order1': oid1,  # ENTRY order 1 (50% with TP1)
+                                                'order2': oid2,  # ENTRY order 2 (50% with TP2)
                                                 'entry': signal.entry_price,
                                                 'direction': signal.direction,
+                                                'entry_filled': False,  # Set True when entry fills
                                                 'tp1_filled': False,
                                                 'tp1_price': signal.partial_tp_price,
                                                 'tp2_price': signal.tp_price,
                                                 'sl_price': signal.sl_price,
                                                 'leverage': signal.leverage,  # For TG notification
                                                 'qty': qty,
+                                                'initial_qty': qty,  # Track for TP1 detection
                                                 'margin_used': qty * signal.entry_price / signal.leverage,
                                                 'entry_time': now,
                                                 'db_trade_id': db_trade_id,  # For exit logging
                                                 'equity_at_entry': equity,
                                             }
-                                            print(f"  [TRACK] Registered for SL→BE monitoring", flush=True)
+                                            print(f"  [TRACK] Registered for TP/SL monitoring", flush=True)
                                     else:
                                         print(f"  [ERR2] {resp2['retMsg']}", flush=True)
 
