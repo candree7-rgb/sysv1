@@ -33,6 +33,9 @@ OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '100'))  # Same as backtest (was 50)
 RR_TARGET = float(os.getenv('RR_TARGET', '2.0'))  # Same as backtest (was 1.5)
 SL_BUFFER_PCT = float(os.getenv('SL_BUFFER_PCT', '0.05'))
 
+# Order Expiry - SAME AS BACKTEST (skip OBs detected too long ago)
+MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # 30 min like backtest
+
 # Volume Filter - SAME AS BACKTEST (confirms institutional interest)
 MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
 USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
@@ -455,6 +458,14 @@ class OBScalperLive:
                 if ob_age > OB_MAX_AGE or ob_age < 0:
                     ob_old += 1
                     continue
+
+                # Order expiry simulation - SAME AS BACKTEST
+                # Skip OBs that were detected too long ago (order would have expired)
+                ob_detection_time = ob.detection_timestamp if hasattr(ob, 'detection_timestamp') and ob.detection_timestamp else ob.timestamp
+                time_since_detection_min = (ts - ob_detection_time).total_seconds() / 60
+                if time_since_detection_min > MAX_ORDER_AGE_MIN:
+                    ob_old += 1  # Count as "old" for logging
+                    continue  # Order would have expired in backtest!
 
                 # Direction match
                 if direction == 'long' and not ob.is_bullish:
