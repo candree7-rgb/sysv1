@@ -605,21 +605,29 @@ if position_was_reduced and position_still_open and not tp1_taken
 
 // Long Position Management
 if strategy.position_size > 0
-    // Always set TP1 for 50% (limit only, no stop)
-    strategy.exit("TP1_L", "Long", qty=tp1_qty, limit=active_tp1, comment="TP1")
-    // Always set TP2 for remaining 50% (limit only, no stop)
-    strategy.exit("TP2_L", "Long", qty=tp2_qty, limit=active_tp2, comment="TP2")
-    // Separate SL that updates to BE after TP1
-    strategy.exit("SL_L", "Long", stop=current_sl, comment=tp1_taken ? "BE" : "SL")
+    // GAP PROTECTION: If price gaps below SL, close immediately at market
+    if not na(current_sl) and low < current_sl
+        strategy.close("Long", comment="SL Gap")
+    else
+        // Always set TP1 for 50% (limit only, no stop)
+        strategy.exit("TP1_L", "Long", qty=tp1_qty, limit=active_tp1, comment="TP1")
+        // Always set TP2 for remaining 50% (limit only, no stop)
+        strategy.exit("TP2_L", "Long", qty=tp2_qty, limit=active_tp2, comment="TP2")
+        // Separate SL that updates to BE after TP1
+        strategy.exit("SL_L", "Long", stop=current_sl, comment=tp1_taken ? "BE" : "SL")
 
 // Short Position Management
 if strategy.position_size < 0
-    // Always set TP1 for 50% (limit only, no stop)
-    strategy.exit("TP1_S", "Short", qty=tp1_qty, limit=active_tp1, comment="TP1")
-    // Always set TP2 for remaining 50% (limit only, no stop)
-    strategy.exit("TP2_S", "Short", qty=tp2_qty, limit=active_tp2, comment="TP2")
-    // Separate SL that updates to BE after TP1
-    strategy.exit("SL_S", "Short", stop=current_sl, comment=tp1_taken ? "BE" : "SL")
+    // GAP PROTECTION: If price gaps above SL, close immediately at market
+    if not na(current_sl) and high > current_sl
+        strategy.close("Short", comment="SL Gap")
+    else
+        // Always set TP1 for 50% (limit only, no stop)
+        strategy.exit("TP1_S", "Short", qty=tp1_qty, limit=active_tp1, comment="TP1")
+        // Always set TP2 for remaining 50% (limit only, no stop)
+        strategy.exit("TP2_S", "Short", qty=tp2_qty, limit=active_tp2, comment="TP2")
+        // Separate SL that updates to BE after TP1
+        strategy.exit("SL_S", "Short", stop=current_sl, comment=tp1_taken ? "BE" : "SL")
 
 // Reset on full position close
 if strategy.position_size == 0 and strategy.position_size[1] != 0
