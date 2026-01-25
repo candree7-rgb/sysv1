@@ -719,15 +719,20 @@ def run_scalper_live():
         pending_orders=len(pending_orders),
     )
 
-    # === BATCH SCAN: Scan all coins, then pick best signals ===
-    SCAN_DELAY = float(os.getenv('SCAN_DELAY', '0.5'))  # seconds between batches (for rate limits)
-    SYNC_TO_CANDLE = os.getenv('SYNC_TO_CANDLE', 'true').lower() == 'true'  # Sync scan to candle close
-    PARALLEL_BATCH_SIZE = int(os.getenv('PARALLEL_BATCH_SIZE', '10'))  # Coins to scan in parallel
+    # === SEQUENTIAL SCAN: One coin at a time with subprocess timeout ===
+    SCAN_DELAY = float(os.getenv('SCAN_DELAY', '0.5'))  # seconds between coins
+    SYNC_TO_CANDLE = os.getenv('SYNC_TO_CANDLE', 'true').lower() == 'true'
+    SCAN_TIMEOUT = 15  # seconds per coin
+
+    # Known problematic coins that always hang
+    SCAN_SKIP = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT',
+                 'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT', 'FHEUSDT', 'SKRUSDT',
+                 'ELSAUSDT', 'FIGHTUSDT', 'SPACEUSDT', 'ACUUSDT', 'XUSDT',
+                 '1000CATUSDT', '1000CHEEMSUSDT', 'COWUSDT', 'POPCATUSDT'}
 
     def wait_for_candle_close():
-        """Wait for next 1-minute candle close (second 2-3 of new minute)"""
+        """Wait for next 1-minute candle close"""
         now = datetime.utcnow()
-        # Calculate seconds until next minute + 2 seconds buffer for data to settle
         seconds_to_wait = 60 - now.second + 2
         if seconds_to_wait > 60:
             seconds_to_wait -= 60
@@ -736,114 +741,49 @@ def run_scalper_live():
             time.sleep(seconds_to_wait)
         return datetime.utcnow()
 
-    def scan_coin_thread(symbol):
-        """Scan a single coin (runs in thread pool)"""
+    def _scan_worker(sym, queue):
+        """Worker process for scanning one coin"""
         try:
-            result = scanner.get_signal(symbol)
-            return ('ok', symbol, result)
+            from ob_scalper_live import OBScalperLive
+            s = OBScalperLive()
+            result = s.get_signal(sym)
+            queue.put(('ok', result))
         except Exception as ex:
-            return ('error', symbol, str(ex)[:50])
-
-    def scan_batch_parallel(coin_batch, timeout_per_coin=15):
-        """Scan multiple coins in parallel using threads"""
-        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
-
-        results = []
-        with ThreadPoolExecutor(max_workers=len(coin_batch)) as executor:
-            # Submit all coins in batch
-            future_to_coin = {executor.submit(scan_coin_thread, coin): coin for coin in coin_batch}
-
-            # Collect results with timeout
-            for future in as_completed(future_to_coin, timeout=timeout_per_coin * len(coin_batch)):
-                try:
-                    status, symbol, data = future.result(timeout=timeout_per_coin)
-                    results.append((status, symbol, data))
-                except FuturesTimeout:
-                    symbol = future_to_coin[future]
-                    results.append(('timeout', symbol, None))
-                except Exception as e:
-                    symbol = future_to_coin[future]
-                    results.append(('error', symbol, str(e)[:30]))
-
-        return results
+            queue.put(('error', str(ex)[:50]))
 
     coin_index = 0
     last_status_time = time.time()
-    STATUS_INTERVAL = 60  # Status update every 60 seconds
+    STATUS_INTERVAL = 60
     signals_found = 0
-    runtime_skip = set()  # Coins that timeout get added here automatically
-    used_obs = set()  # Track OBs that have been traded (filled) - format: "SYMBOL_obtop_obbottom"
-    batch_signals = []  # Collect signals during scan cycle, process at end
+    runtime_skip = set()  # Auto-skip coins that timeout
+    used_obs = set()
+    batch_signals = []
 
-    num_batches = (len(coins) + PARALLEL_BATCH_SIZE - 1) // PARALLEL_BATCH_SIZE
-    print(f"\n[PARALLEL SCAN] {len(coins)} coins in {num_batches} batches of {PARALLEL_BATCH_SIZE}", flush=True)
-    print(f"[PARALLEL SCAN] Estimated cycle: {num_batches * (SCAN_DELAY + 1.5):.0f}s", flush=True)
+    # Filter out known problematic coins
+    scan_coins = [c for c in coins if c not in SCAN_SKIP]
+    print(f"\n[SCAN] {len(scan_coins)} coins ({len(SCAN_SKIP)} skipped)", flush=True)
+    print(f"[SCAN] Delay: {SCAN_DELAY}s, Timeout: {SCAN_TIMEOUT}s per coin", flush=True)
 
     while True:
         try:
+            now = datetime.utcnow()
+
             # === SYNC TO CANDLE CLOSE (start of each cycle) ===
             if SYNC_TO_CANDLE and coin_index == 0:
                 now = wait_for_candle_close()
                 print(f"[SCAN] Starting cycle at {now.strftime('%H:%M:%S')}", flush=True)
-                scan_start_time = time.time()
-            else:
-                now = datetime.utcnow()
+                batch_signals = []  # Clear for new cycle
 
-            # === PARALLEL BATCH SCAN ===
-            if coin_index == 0:
-                # Start fresh batch scan
-                batch_signals = []  # Clear previous signals
+            # Get current coin
+            if coin_index >= len(scan_coins):
+                coin_index = 0
+                continue
 
-                # Scan all coins in parallel batches
-                active_coins = [c for c in coins if c not in runtime_skip]
-                total_scanned = 0
+            symbol = scan_coins[coin_index]
 
-                for batch_start in range(0, len(active_coins), PARALLEL_BATCH_SIZE):
-                    batch = active_coins[batch_start:batch_start + PARALLEL_BATCH_SIZE]
-                    batch_num = batch_start // PARALLEL_BATCH_SIZE + 1
-
-                    print(f"  [Batch {batch_num}/{num_batches}] {len(batch)} coins...", end="", flush=True)
-
-                    results = scan_batch_parallel(batch)
-
-                    # Process results
-                    ok_count = 0
-                    for status, symbol, data in results:
-                        if status == 'ok' and data is not None:
-                            ok_count += 1
-                            signal = data
-                            ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
-
-                            if ob_key in used_obs:
-                                pass  # Skip - OB already traded
-                            elif any(o['symbol'] == signal.symbol for o in pending_orders.values()):
-                                pass  # Skip - already pending
-                            else:
-                                signal._ob_key = ob_key
-                                batch_signals.append(signal)
-
-                        elif status == 'timeout':
-                            runtime_skip.add(symbol)
-
-                    total_scanned += len(batch)
-                    print(f" {ok_count} signals", flush=True)
-
-                    # Rate limit pause between batches
-                    if batch_start + PARALLEL_BATCH_SIZE < len(active_coins):
-                        time.sleep(SCAN_DELAY)
-
-                # Show scan summary
-                scan_time = time.time() - scan_start_time if 'scan_start_time' in dir() else 0
-                print(f"  [SCAN DONE] {total_scanned} coins in {scan_time:.1f}s, {len(batch_signals)} signals", flush=True)
-
-                # Skip to batch processing
-                coin_index = len(coins) - 1  # Jump to end of cycle
-
-            symbol = coins[coin_index]
-
-            # Skip coins that timed out previously (legacy, kept for compatibility)
+            # Skip coins that timed out before
             if symbol in runtime_skip:
-                coin_index = (coin_index + 1) % len(coins)
+                coin_index += 1
                 continue
 
             # === STATUS UPDATE (every 60s) ===
@@ -1001,13 +941,58 @@ def run_scalper_live():
                         del trade_pairs[sym]
 
                 print(f"  Positions: {longs}L/{shorts}S | Pending: {len(pending_orders)}", flush=True)
-                print(f"  Cycle: {coin_index}/{len(coins)} | Signals: {signals_found}", flush=True)
+                print(f"  Cycle: {coin_index}/{len(scan_coins)} | Signals: {signals_found}", flush=True)
                 if runtime_skip:
-                    print(f"  Auto-skipped: {', '.join(runtime_skip)}", flush=True)
+                    print(f"  Auto-skipped: {', '.join(list(runtime_skip)[:5])}", flush=True)
+
+            # === SCAN SINGLE COIN (with subprocess timeout) ===
+            import multiprocessing as mp
+
+            print(f"  [{coin_index+1}/{len(scan_coins)}] {symbol}...", end="", flush=True)
+
+            signal = None
+            try:
+                result_queue = mp.Queue()
+                proc = mp.Process(target=_scan_worker, args=(symbol, result_queue))
+                proc.start()
+                proc.join(timeout=SCAN_TIMEOUT)
+
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join()
+                    print(" TIMEOUT!", flush=True)
+                    runtime_skip.add(symbol)
+                elif not result_queue.empty():
+                    status, data = result_queue.get_nowait()
+                    if status == 'ok' and data is not None:
+                        signal = data
+                        print(f" OK (score={signal.score:.1f})", flush=True)
+                    else:
+                        print(" skip", flush=True)
+                else:
+                    print(" skip", flush=True)
+            except Exception as e:
+                print(f" err", flush=True)
+
+            # Add signal to batch if valid
+            if signal:
+                ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
+
+                if ob_key in used_obs:
+                    print(f"    [SKIP] OB already traded", flush=True)
+                elif any(o['symbol'] == signal.symbol for o in pending_orders.values()):
+                    print(f"    [SKIP] Already pending", flush=True)
+                else:
+                    signal._ob_key = ob_key
+                    batch_signals.append(signal)
+                    print(f"    [BATCH+] Added to batch ({len(batch_signals)} total)", flush=True)
+
+            # Move to next coin
+            coin_index += 1
+            time.sleep(SCAN_DELAY)
 
             # === END OF CYCLE: Process batch and place orders ===
-            # (Parallel batch scan already completed above)
-            if coin_index == len(coins) - 1 and batch_signals:
+            if coin_index >= len(scan_coins) and batch_signals:
                 print(f"\n[BATCH] Cycle complete - {len(batch_signals)} signals collected", flush=True)
 
                 # Get current positions
@@ -1290,9 +1275,11 @@ def run_scalper_live():
                                 except Exception as e:
                                     print(f"  [ERR] {str(e)[:50]}", flush=True)
 
-            # Next coin
-            coin_index = (coin_index + 1) % len(coins)
-            time.sleep(SCAN_DELAY)
+            # Reset coin_index at end of cycle (if we processed signals or if no signals)
+            if coin_index >= len(scan_coins):
+                coin_index = 0
+                if not batch_signals:
+                    print(f"\n[CYCLE] Complete - no signals this cycle", flush=True)
 
         except KeyboardInterrupt:
             print("\nStopping...", flush=True)
