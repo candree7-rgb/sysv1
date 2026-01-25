@@ -332,31 +332,16 @@ def run_backtest(
                     t.exit_price = t.current_sl
                     t.exit_reason = 'sl'
             else:
-                # === CANDLE 2+: Smart profit tracking using CLOSE ===
+                # === CANDLE 2+: Conservative profit tracking ===
+                # SIMPLE RULE: If SL could be hit, don't update profit tracking
+                # This prevents partial TP triggering when price just drops to SL
                 sl_could_be_hit = False
-                tp_could_be_hit = False
-
                 if t.direction == 'long':
                     sl_could_be_hit = candle['low'] <= t.current_sl
-                    tp_could_be_hit = candle['high'] >= t.entry_price * 1.005  # 0.5%+ profit
                 else:
                     sl_could_be_hit = candle['high'] >= t.current_sl
-                    tp_could_be_hit = candle['low'] <= t.entry_price * 0.995
 
-                # Use CLOSE to determine order when both could be hit
-                allow_profit_update = True
-                if sl_could_be_hit and tp_could_be_hit:
-                    # BOTH touched - CLOSE tells us which was FIRST
-                    if t.direction == 'long':
-                        # CLOSE < entry → ended LOW → went UP first → TP first
-                        allow_profit_update = candle['close'] < t.entry_price
-                    else:
-                        # CLOSE > entry → ended HIGH → went DOWN first → TP first
-                        allow_profit_update = candle['close'] > t.entry_price
-                elif sl_could_be_hit and not tp_could_be_hit:
-                    allow_profit_update = False  # Only SL, no profit
-
-                if allow_profit_update:
+                if not sl_could_be_hit:
                     # TP was likely first - update profit tracking
                     if t.direction == 'long':
                         t.max_profit_price = max(t.max_profit_price, candle['high'])
@@ -476,25 +461,10 @@ def run_backtest(
                     tp_touched = candle['high'] >= t.tp_price
                     sl_touched = candle['low'] <= t.current_sl
 
-                    # DEBUG ERA
-                    if symbol == 'ERAUSDT' and (tp_touched or sl_touched):
-                        print(f"    [ERA DEBUG] bar={t.bars_in_trade}, O={candle['open']:.5f}, H={candle['high']:.5f}, L={candle['low']:.5f}, C={candle['close']:.5f}")
-                        print(f"    [ERA DEBUG] entry={t.entry_price:.5f}, SL={t.current_sl:.5f}, TP={t.tp_price:.5f}")
-                        print(f"    [ERA DEBUG] tp_touched={tp_touched}, sl_touched={sl_touched}")
-
-                    # SMART CHECK: If BOTH touched, use CLOSE to determine order
-                    # (Only for candle 2+, entry candle already handled above)
+                    # CONSERVATIVE: If BOTH touched, assume SL was first (worst case)
                     if tp_touched and sl_touched:
-                        # CLOSE >= entry means price ended HIGH → went DOWN first → SL first
-                        # CLOSE < entry means price ended LOW → went UP first → TP first
-                        if candle['close'] >= t.entry_price:
-                            # Ended high → SL was hit first, then rallied (but we're out)
-                            t.exit_price = t.current_sl
-                            t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
-                        else:
-                            # Ended low → TP was hit first, then dropped (but we're out with profit)
-                            t.exit_price = t.tp_price
-                            t.exit_reason = 'tp'
+                        t.exit_price = t.current_sl
+                        t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
                     elif sl_touched:
                         t.exit_price = t.current_sl
                         t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
@@ -520,19 +490,10 @@ def run_backtest(
                     tp_touched = candle['low'] <= t.tp_price
                     sl_touched = candle['high'] >= t.current_sl
 
-                    # SMART CHECK: If BOTH touched, use CLOSE to determine order
-                    # (Only for candle 2+, entry candle already handled above)
+                    # CONSERVATIVE: If BOTH touched, assume SL was first (worst case)
                     if tp_touched and sl_touched:
-                        # CLOSE <= entry means price ended LOW → went UP first → SL first
-                        # CLOSE > entry means price ended HIGH → went DOWN first → TP first
-                        if candle['close'] <= t.entry_price:
-                            # Ended low → SL was hit first, then dropped (but we're out)
-                            t.exit_price = t.current_sl
-                            t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
-                        else:
-                            # Ended high → TP was hit first, then pumped (but we're out with profit)
-                            t.exit_price = t.tp_price
-                            t.exit_reason = 'tp'
+                        t.exit_price = t.current_sl
+                        t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
                     elif sl_touched:
                         t.exit_price = t.current_sl
                         t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
