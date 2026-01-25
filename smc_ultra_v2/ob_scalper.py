@@ -476,6 +476,12 @@ def run_backtest(
                     tp_touched = candle['high'] >= t.tp_price
                     sl_touched = candle['low'] <= t.current_sl
 
+                    # DEBUG ERA
+                    if symbol == 'ERAUSDT' and (tp_touched or sl_touched):
+                        print(f"    [ERA DEBUG] bar={t.bars_in_trade}, O={candle['open']:.5f}, H={candle['high']:.5f}, L={candle['low']:.5f}, C={candle['close']:.5f}")
+                        print(f"    [ERA DEBUG] entry={t.entry_price:.5f}, SL={t.current_sl:.5f}, TP={t.tp_price:.5f}")
+                        print(f"    [ERA DEBUG] tp_touched={tp_touched}, sl_touched={sl_touched}")
+
                     # SMART CHECK: If BOTH touched, use CLOSE to determine order
                     # (Only for candle 2+, entry candle already handled above)
                     if tp_touched and sl_touched:
