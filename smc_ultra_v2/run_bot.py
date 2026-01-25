@@ -607,49 +607,62 @@ def run_scalper_live():
 
             # === PRELOAD 4H + DAILY DATA (still needs API, but only once!) ===
             print("[STARTUP] Preloading 4H + Daily data (one-time API calls)...", flush=True)
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            import multiprocessing as mp
 
-            # Known problematic coins (same as download skip list)
+            # Known problematic coins - SAME AS DOWNLOAD (these ALWAYS hang)
             PRELOAD_SKIP = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT',
                            'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT', 'FHEUSDT', 'SKRUSDT',
-                           'ELSAUSDT', 'FIGHTUSDT', 'SPACEUSDT', 'ACUUSDT'}
+                           'ELSAUSDT', 'FIGHTUSDT', 'SPACEUSDT', 'ACUUSDT', 'XUSDT',
+                           '1000CATUSDT', '1000CHEEMSUSDT', 'COWUSDT', 'POPCATUSDT'}
+
+            # Filter coins FIRST (don't even try problematic ones)
+            preload_coins = [c for c in coins if c not in PRELOAD_SKIP]
+            skipped_count = len(coins) - len(preload_coins)
+            if skipped_count > 0:
+                print(f"  [SKIP] {skipped_count} known problematic coins", flush=True)
 
             preload_errors = 0
-            preload_skipped = []
+            preload_timeout = []
 
-            def preload_coin(coin):
-                """Load 4H + Daily for one coin"""
-                scanner._get_cached(coin, "240", 14)  # 4H
-                scanner._get_cached(coin, "D", 30)    # Daily
-                return True
-
-            for i, coin in enumerate(coins):
-                # Skip known problematic coins
-                if coin in PRELOAD_SKIP:
-                    preload_skipped.append(coin)
-                    continue
-
+            def _preload_worker(coin, queue):
+                """Worker process for preloading one coin"""
                 try:
-                    # Use thread with 10 second timeout per coin
-                    with ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(preload_coin, coin)
-                        future.result(timeout=10)  # 10 sec max per coin
+                    from ob_scalper_live import OBScalperLive
+                    s = OBScalperLive()
+                    s._get_cached(coin, "240", 14)  # 4H
+                    s._get_cached(coin, "D", 30)    # Daily
+                    queue.put(('ok', coin))
+                except Exception as e:
+                    queue.put(('error', str(e)[:30]))
+
+            for i, coin in enumerate(preload_coins):
+                try:
+                    # Use subprocess with hard timeout (can kill if hangs)
+                    result_queue = mp.Queue()
+                    proc = mp.Process(target=_preload_worker, args=(coin, result_queue))
+                    proc.start()
+                    proc.join(timeout=8)  # 8 sec max per coin
+
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join()
+                        preload_timeout.append(coin)
+                        preload_errors += 1
+                    elif not result_queue.empty():
+                        status, _ = result_queue.get_nowait()
+                        if status != 'ok':
+                            preload_errors += 1
 
                     if (i + 1) % 20 == 0:
-                        print(f"  [PRELOAD] {i + 1}/{len(coins)} coins...", flush=True)
+                        print(f"  [PRELOAD] {i + 1}/{len(preload_coins)} coins...", flush=True)
 
-                except FuturesTimeout:
-                    preload_errors += 1
-                    preload_skipped.append(coin)
-                    PRELOAD_SKIP.add(coin)  # Auto-skip next time
                 except Exception as e:
                     preload_errors += 1
 
-                time.sleep(0.2)  # Small delay between coins
-
-            print(f"[STARTUP] Preload complete ({len(coins) - preload_errors - len(preload_skipped)}/{len(coins)} coins)", flush=True)
-            if preload_skipped:
-                print(f"  [SKIP] {', '.join(preload_skipped[:5])}{'...' if len(preload_skipped) > 5 else ''}", flush=True)
+            success = len(preload_coins) - preload_errors
+            print(f"[STARTUP] Preload complete ({success}/{len(preload_coins)} coins)", flush=True)
+            if preload_timeout:
+                print(f"  [TIMEOUT] {', '.join(preload_timeout[:5])}{'...' if len(preload_timeout) > 5 else ''}", flush=True)
 
         except Exception as e:
             print(f"[WARN] WebSocket failed: {e} - falling back to API", flush=True)
