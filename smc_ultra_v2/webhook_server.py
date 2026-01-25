@@ -137,10 +137,16 @@ def place_limit_order_with_tp_sl(
     sl: float,
     tp1: float,
     tp2: float,
-    symbol_info: Dict[str, Any]
+    symbol_info: Dict[str, Any],
+    tp_mode: str = "split"  # "split" = 50/50, "single" = 100% at TP1
 ) -> Optional[str]:
     """
     Place limit order at OB edge with TP/SL.
+
+    tp_mode:
+      - "split": 50% at TP1, 50% at TP2
+      - "single": 100% at TP1
+
     Returns order ID if successful.
     """
     try:
@@ -158,68 +164,97 @@ def place_limit_order_with_tp_sl(
 
         side = "Buy" if direction == "long" else "Sell"
 
-        # Split into two orders: 50% with TP1, 50% with TP2
-        qty1 = round_qty(qty * 0.5, symbol_info['qty_step'])
-        qty2 = round_qty(qty - qty1, symbol_info['qty_step'])
+        if tp_mode == "single":
+            # Single TP mode: 100% at TP1
+            result = client.place_order(
+                category="linear",
+                symbol=symbol,
+                side=side,
+                orderType="Limit",
+                qty=str(qty),
+                price=str(entry),
+                stopLoss=str(sl),
+                takeProfit=str(tp1),
+                timeInForce="GTC",
+                reduceOnly=False
+            )
 
-        # Order 1: 50% with TP1
-        result1 = client.place_order(
-            category="linear",
-            symbol=symbol,
-            side=side,
-            orderType="Limit",
-            qty=str(qty1),
-            price=str(entry),
-            stopLoss=str(sl),
-            takeProfit=str(tp1),
-            timeInForce="GTC",
-            reduceOnly=False
-        )
+            if result['retCode'] == 0:
+                order_id = result['result']['orderId']
+                print(f"  [ORDER] {side} {qty} @ {entry}, TP={tp1}, SL={sl} -> {order_id[:8]}...")
+                pending_orders[order_id] = {
+                    'symbol': symbol,
+                    'created_at': datetime.utcnow(),
+                    'paired_order': None
+                }
+                return order_id
+            else:
+                print(f"  [ERROR] Order failed: {result['retMsg']}")
+                return None
 
-        order_id_1 = None
-        if result1['retCode'] == 0:
-            order_id_1 = result1['result']['orderId']
-            print(f"  [ORDER 1] {side} {qty1} @ {entry}, TP1={tp1}, SL={sl} -> {order_id_1[:8]}...")
         else:
-            print(f"  [ERROR] Order 1 failed: {result1['retMsg']}")
-            return None
+            # Split mode: 50% at TP1, 50% at TP2
+            qty1 = round_qty(qty * 0.5, symbol_info['qty_step'])
+            qty2 = round_qty(qty - qty1, symbol_info['qty_step'])
 
-        # Order 2: 50% with TP2
-        result2 = client.place_order(
-            category="linear",
-            symbol=symbol,
-            side=side,
-            orderType="Limit",
-            qty=str(qty2),
-            price=str(entry),
-            stopLoss=str(sl),
-            takeProfit=str(tp2),
-            timeInForce="GTC",
-            reduceOnly=False
-        )
+            # Order 1: 50% with TP1
+            result1 = client.place_order(
+                category="linear",
+                symbol=symbol,
+                side=side,
+                orderType="Limit",
+                qty=str(qty1),
+                price=str(entry),
+                stopLoss=str(sl),
+                takeProfit=str(tp1),
+                timeInForce="GTC",
+                reduceOnly=False
+            )
 
-        order_id_2 = None
-        if result2['retCode'] == 0:
-            order_id_2 = result2['result']['orderId']
-            print(f"  [ORDER 2] {side} {qty2} @ {entry}, TP2={tp2}, SL={sl} -> {order_id_2[:8]}...")
-        else:
-            print(f"  [ERROR] Order 2 failed: {result2['retMsg']}")
+            order_id_1 = None
+            if result1['retCode'] == 0:
+                order_id_1 = result1['result']['orderId']
+                print(f"  [ORDER 1] {side} {qty1} @ {entry}, TP1={tp1}, SL={sl} -> {order_id_1[:8]}...")
+            else:
+                print(f"  [ERROR] Order 1 failed: {result1['retMsg']}")
+                return None
 
-        # Track for cancellation
-        if order_id_1:
-            pending_orders[order_id_1] = {
-                'symbol': symbol,
-                'created_at': datetime.utcnow(),
-                'paired_order': order_id_2
-            }
-        if order_id_2:
-            pending_orders[order_id_2] = {
-                'symbol': symbol,
-                'created_at': datetime.utcnow(),
-                'paired_order': order_id_1
-            }
+            # Order 2: 50% with TP2
+            result2 = client.place_order(
+                category="linear",
+                symbol=symbol,
+                side=side,
+                orderType="Limit",
+                qty=str(qty2),
+                price=str(entry),
+                stopLoss=str(sl),
+                takeProfit=str(tp2),
+                timeInForce="GTC",
+                reduceOnly=False
+            )
 
-        return order_id_1
+            order_id_2 = None
+            if result2['retCode'] == 0:
+                order_id_2 = result2['result']['orderId']
+                print(f"  [ORDER 2] {side} {qty2} @ {entry}, TP2={tp2}, SL={sl} -> {order_id_2[:8]}...")
+            else:
+                print(f"  [ERROR] Order 2 failed: {result2['retMsg']}")
+
+            # Track for cancellation
+            if order_id_1:
+                pending_orders[order_id_1] = {
+                    'symbol': symbol,
+                    'created_at': datetime.utcnow(),
+                    'paired_order': order_id_2
+                }
+            if order_id_2:
+                pending_orders[order_id_2] = {
+                    'symbol': symbol,
+                    'created_at': datetime.utcnow(),
+                    'paired_order': order_id_1
+                }
+
+            return order_id_1
 
     except Exception as e:
         print(f"[ERROR] Place order failed: {e}")
@@ -285,10 +320,14 @@ def webhook():
         "sl": 49500.00,
         "tp1": 50500.00,
         "tp2": 51000.00,
+        "tp_mode": "split" or "single",
         "risk_pct": 2.0,
-        "timeframe": "5",
-        "timestamp": "..."
+        "timeframe": "5"
     }
+
+    tp_mode:
+      - "split": 50% at TP1, 50% at TP2 (default)
+      - "single": 100% at TP1 only
     """
     try:
         # Verify signature if configured
@@ -326,6 +365,7 @@ def handle_entry(data: Dict[str, Any]):
     tp1 = float(data.get('tp1', 0))
     tp2 = float(data.get('tp2', 0))
     risk_pct = float(data.get('risk_pct', 2.0))
+    tp_mode = data.get('tp_mode', 'split')  # "split" = 50/50, "single" = 100% TP1
 
     # Validate
     if not symbol or not direction or not entry or not sl:
@@ -333,6 +373,9 @@ def handle_entry(data: Dict[str, Any]):
 
     if direction not in ['long', 'short']:
         return jsonify({'error': 'Invalid direction'}), 400
+
+    if tp_mode not in ['split', 'single']:
+        tp_mode = 'split'  # Default to split if invalid
 
     # Ensure symbol has USDT suffix for Bybit
     if not symbol.endswith('USDT'):
@@ -343,7 +386,8 @@ def handle_entry(data: Dict[str, Any]):
     print(f"  Entry: {entry}")
     print(f"  SL: {sl} ({abs(entry-sl)/entry*100:.2f}%)")
     print(f"  TP1: {tp1}")
-    print(f"  TP2: {tp2}")
+    print(f"  TP2: {tp2}" if tp_mode == 'split' else f"  TP: {tp1} (single mode)")
+    print(f"  Mode: {tp_mode}")
     print(f"  Risk: {risk_pct}%")
 
     # Initialize client
@@ -378,7 +422,8 @@ def handle_entry(data: Dict[str, Any]):
         sl=sl,
         tp1=tp1,
         tp2=tp2,
-        symbol_info=symbol_info
+        symbol_info=symbol_info,
+        tp_mode=tp_mode
     )
 
     if order_id:
