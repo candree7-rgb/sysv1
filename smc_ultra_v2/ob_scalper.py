@@ -461,10 +461,18 @@ def run_backtest(
                     tp_touched = candle['high'] >= t.tp_price
                     sl_touched = candle['low'] <= t.current_sl
 
-                    # CONSERVATIVE: If BOTH touched, assume SL was first (worst case)
+                    # SMART: If BOTH touched, use CLOSE distance to determine
                     if tp_touched and sl_touched:
-                        t.exit_price = t.current_sl
-                        t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
+                        dist_to_sl = abs(candle['close'] - t.current_sl)
+                        dist_to_tp = abs(candle['close'] - t.tp_price)
+                        # If CLOSE clearly closer to TP (at least 2x), assume TP first
+                        if dist_to_tp < dist_to_sl * 0.5:
+                            t.exit_price = t.tp_price
+                            t.exit_reason = 'tp'
+                        else:
+                            # CLOSE closer to SL or ambiguous → assume SL (conservative)
+                            t.exit_price = t.current_sl
+                            t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
                     elif sl_touched:
                         t.exit_price = t.current_sl
                         t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
@@ -490,10 +498,18 @@ def run_backtest(
                     tp_touched = candle['low'] <= t.tp_price
                     sl_touched = candle['high'] >= t.current_sl
 
-                    # CONSERVATIVE: If BOTH touched, assume SL was first (worst case)
+                    # SMART: If BOTH touched, use CLOSE distance to determine
                     if tp_touched and sl_touched:
-                        t.exit_price = t.current_sl
-                        t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
+                        dist_to_sl = abs(candle['close'] - t.current_sl)
+                        dist_to_tp = abs(candle['close'] - t.tp_price)
+                        # If CLOSE clearly closer to TP (at least 2x), assume TP first
+                        if dist_to_tp < dist_to_sl * 0.5:
+                            t.exit_price = t.tp_price
+                            t.exit_reason = 'tp'
+                        else:
+                            # CLOSE closer to SL or ambiguous → assume SL (conservative)
+                            t.exit_price = t.current_sl
+                            t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
                     elif sl_touched:
                         t.exit_price = t.current_sl
                         t.exit_reason = 'trail' if t.trail_level > 0 else ('be' if t.be_triggered else 'sl')
