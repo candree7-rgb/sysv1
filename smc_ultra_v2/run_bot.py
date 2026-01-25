@@ -945,19 +945,34 @@ def run_scalper_live():
                 if runtime_skip:
                     print(f"  Auto-skipped: {', '.join(list(runtime_skip)[:5])}", flush=True)
 
-            # === SCAN SINGLE COIN (direct, uses WebSocket cache) ===
+            # === SCAN SINGLE COIN (with subprocess timeout) ===
+            import multiprocessing as mp
+
             print(f"  [{coin_index+1}/{len(scan_coins)}] {symbol}...", end="", flush=True)
 
             signal = None
             try:
-                # Direct scan - uses WebSocket cache (no subprocess = shared memory)
-                signal = scanner.get_signal(symbol)
-                if signal:
-                    print(f" OK (score={signal.score:.1f})", flush=True)
+                result_queue = mp.Queue()
+                proc = mp.Process(target=_scan_worker, args=(symbol, result_queue))
+                proc.start()
+                proc.join(timeout=SCAN_TIMEOUT)
+
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join()
+                    print(" TIMEOUT!", flush=True)
+                    runtime_skip.add(symbol)
+                elif not result_queue.empty():
+                    status, data = result_queue.get_nowait()
+                    if status == 'ok' and data is not None:
+                        signal = data
+                        print(f" OK (score={signal.score:.1f})", flush=True)
+                    else:
+                        print(" skip", flush=True)
                 else:
                     print(" skip", flush=True)
             except Exception as e:
-                print(f" err ({str(e)[:20]})", flush=True)
+                print(f" err", flush=True)
 
             # Add signal to batch if valid
             if signal:
