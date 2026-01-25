@@ -225,19 +225,35 @@ class OBScalperLive:
         self._preloaded = True
 
     def _get_cached(self, symbol: str, interval: str, days: int):
-        """Get data with caching to reduce API calls"""
+        """Get data with caching - tries WebSocket first, then API"""
         import time
         now = time.time()
 
         cache_key = f"{symbol}_{interval}"
+
+        # === TRY WEBSOCKET CACHE FIRST (for 5m and 1h) ===
+        if interval in ['5', '60']:
+            try:
+                from live.candle_streamer import get_candle_streamer
+                streamer = get_candle_streamer()
+                if streamer and streamer.has_data(symbol, interval, min_candles=50):
+                    df = streamer.get_candles(symbol, interval, limit=200)
+                    if df is not None and len(df) >= 50:
+                        # Cache it for consistency
+                        self._data_cache[cache_key] = (df, now)
+                        return df
+            except:
+                pass  # Fall through to API
+
+        # === CHECK MEMORY CACHE ===
         if cache_key in self._data_cache:
             df, cached_at = self._data_cache[cache_key]
             cache_duration = self._cache_duration.get(interval, 300)
             if now - cached_at < cache_duration:
                 return df  # Return cached
 
+        # === FALL BACK TO API ===
         # For LIVE trading: ensure file cache also has fresh candles
-        # Max candle age = interval + small buffer (for 100% backtest parity)
         max_candle_age = {
             '1': 3,        # 1m: max 3 min old
             '5': 10,       # 5m: max 10 min old (1 candle behind max)

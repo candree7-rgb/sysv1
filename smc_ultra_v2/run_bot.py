@@ -581,9 +581,34 @@ def run_scalper_live():
     print(f"Max positions: {MAX_LONGS} longs, {MAX_SHORTS} shorts", flush=True)
     print("=" * 60, flush=True)
 
-    # Skip preload - let cache build naturally during scans
-    # First few scans will be slower but won't hang
-    print("\n[STARTUP] Starting scans (HTF cache builds automatically)...", flush=True)
+    # === START WEBSOCKET CANDLE STREAMER ===
+    # Streams 5m and 1h candles for all coins in real-time
+    # Scanner reads from cache = no API calls during scan!
+    USE_WEBSOCKET = os.getenv('USE_WEBSOCKET', 'true').lower() == 'true'
+    candle_streamer = None
+
+    if USE_WEBSOCKET:
+        print("\n[STARTUP] Starting WebSocket candle streamer...", flush=True)
+        try:
+            from live.candle_streamer import start_candle_streamer
+            candle_streamer = start_candle_streamer(coins, testnet=USE_TESTNET)
+
+            # Wait for initial data to stream in
+            print("[STARTUP] Waiting for WebSocket data (30s warmup)...", flush=True)
+            for i in range(6):  # 6 x 5 seconds = 30 seconds
+                time.sleep(5)
+                stats = candle_streamer.get_stats()
+                print(f"  [WS] {stats['symbols_5m']}/{len(coins)} coins with 5m data, {stats['updates_received']} updates", flush=True)
+                if stats['symbols_5m'] >= len(coins) * 0.8:  # 80% of coins have data
+                    break
+
+            stats = candle_streamer.get_stats()
+            print(f"[STARTUP] WebSocket ready: {stats['symbols_5m']} coins streaming", flush=True)
+        except Exception as e:
+            print(f"[WARN] WebSocket failed: {e} - falling back to API", flush=True)
+            USE_WEBSOCKET = False
+    else:
+        print("\n[STARTUP] WebSocket disabled, using API for candle data", flush=True)
 
     # Track pending orders: {order_id: {'symbol': str, 'placed_at': datetime, 'direction': str}}
     pending_orders = {}
