@@ -437,10 +437,16 @@ class OBScalperLive:
             ob_low_vol = 0
 
             for ob in obs:
-                # Not mitigated
+                # Not mitigated (SAME AS BACKTEST - check timestamp)
                 if ob.is_mitigated:
-                    ob_mitigated += 1
-                    continue
+                    # Only skip if mitigation already happened (not in future)
+                    if hasattr(ob, 'mitigation_timestamp') and ob.mitigation_timestamp:
+                        if ob.mitigation_timestamp <= ts:
+                            ob_mitigated += 1
+                            continue  # Already mitigated before this candle
+                    else:
+                        ob_mitigated += 1
+                        continue  # No timestamp, assume mitigated
 
                 # Strength filter
                 min_strength = OB_MIN_STRENGTH_SHORT if direction == 'short' else OB_MIN_STRENGTH

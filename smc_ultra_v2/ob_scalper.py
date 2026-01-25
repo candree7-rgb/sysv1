@@ -313,10 +313,6 @@ def run_backtest(
             t = active_trade  # Shorthand
             t.bars_in_trade += 1
 
-            # DEBUG: Log EVERY candle for ERA to diagnose
-            if symbol == 'ERAUSDT' and t.entry_price > 0.26:
-                print(f"    [ERA] bar={t.bars_in_trade} | O={candle['open']:.4f} H={candle['high']:.4f} L={candle['low']:.4f} C={candle['close']:.4f} | SL={t.current_sl:.4f} TP={t.tp_price:.4f}")
-
             # === ENTRY CANDLE: Only check SL, no profit tracking ===
             # On the first candle, we don't know if price went up first or down first.
             # Conservative approach: assume no profit on entry candle, only check SL.
