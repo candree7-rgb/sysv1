@@ -40,9 +40,6 @@ MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # 30 min like bac
 MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
 USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
 
-# Minimum SL distance - skip trades where SL is too tight (tiny profits)
-MIN_SL_PCT = float(os.getenv('MIN_SL_PCT', '0.5'))  # Minimum 0.5% SL distance
-
 # MTF Filters
 USE_4H_MTF = os.getenv('USE_4H_MTF', 'true').lower() == 'true'
 USE_DAILY_FOR_SHORTS = os.getenv('USE_DAILY_FOR_SHORTS', 'true').lower() == 'true'
@@ -54,7 +51,8 @@ PARTIAL_TP_LEVEL = float(os.getenv('PARTIAL_TP_LEVEL', '0.5'))
 PARTIAL_SIZE = float(os.getenv('PARTIAL_SIZE', '0.5'))
 
 # Risk & Leverage
-MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '20'))
+MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '50'))  # Max 50x leverage
+MAX_MARGIN_PCT = float(os.getenv('MAX_MARGIN_PCT', '0.50'))  # Max 50% margin per trade
 RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '2.0'))  # Target risk % per trade
 
 
@@ -523,16 +521,24 @@ class OBScalperLive:
                 sl_distance = sl - entry
                 tp = entry - (sl_distance * RR_TARGET)
 
-            # Calculate leverage (same as backtest)
+            # === DYNAMIC LEVERAGE CALCULATION ===
+            # Calculate minimum leverage needed to achieve 2% risk within margin limits
             sl_pct = abs(entry - sl) / entry * 100
+            sl_pct_decimal = sl_pct / 100
 
-            # Skip if SL is too tight - profits would be tiny
-            if sl_pct < MIN_SL_PCT:
+            # min_leverage = position_needed / (max_margin * equity)
+            # But here we don't have equity, so we use a formula:
+            # min_leverage = risk_pct / (sl_pct * max_margin_pct)
+            min_leverage_needed = (RISK_PER_TRADE_PCT / 100) / (sl_pct_decimal * MAX_MARGIN_PCT)
+
+            if min_leverage_needed > MAX_LEVERAGE:
+                # Can't achieve 2% risk within constraints
                 if debug:
-                    print(f"      {symbol}: SKIP - SL too tight ({sl_pct:.2f}% < {MIN_SL_PCT}%)")
+                    print(f"      {symbol}: SKIP - need {min_leverage_needed:.0f}x lev, max {MAX_LEVERAGE}x")
                 return None
 
-            leverage = min(MAX_LEVERAGE, max(5, int(RISK_PER_TRADE_PCT / sl_pct)))
+            # Use minimum leverage that achieves target (round up)
+            leverage = min(MAX_LEVERAGE, max(5, int(min_leverage_needed) + 1))
 
             # Partial TP price
             partial_tp_price = None

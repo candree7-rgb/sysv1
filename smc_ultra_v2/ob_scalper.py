@@ -41,9 +41,6 @@ MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # 30 min like liv
 MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
 USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
 
-# Minimum SL distance - skip trades where SL is too tight (tiny profits even with leverage)
-MIN_SL_PCT = float(os.getenv('MIN_SL_PCT', '0.5'))  # Minimum 0.5% SL distance
-
 # RSI Filter - DISABLED by default (too restrictive, filters good trades)
 RSI_LONG_MAX = int(os.getenv('RSI_LONG_MAX', '45'))
 RSI_SHORT_MIN = int(os.getenv('RSI_SHORT_MIN', '55'))
@@ -79,7 +76,8 @@ USE_TIME_EXIT = os.getenv('USE_TIME_EXIT', 'false').lower() == 'true'
 MAX_BARS = int(os.getenv('MAX_BARS', '60'))  # Max 60 1min bars = 1 hour
 
 # Option 3: Max Leverage Cap
-MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '20'))  # Default 20, set to 10 for lower DD
+MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '50'))  # Max 50x leverage
+MAX_MARGIN_PCT = float(os.getenv('MAX_MARGIN_PCT', '0.50'))  # Max 50% margin per trade
 RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '2.0'))  # Target risk % per trade
 
 # Option 4: Partial Take Profit (lock in profits early, let remainder run)
@@ -673,14 +671,20 @@ def run_backtest(
             sl_distance = sl - entry
             tp = entry - (sl_distance * RR_TARGET)
 
-        # Calculate dynamic leverage based on SL distance
+        # === DYNAMIC LEVERAGE CALCULATION ===
+        # Calculate minimum leverage needed to achieve 2% risk within margin limits
         sl_pct = abs(entry - sl) / entry * 100
+        sl_pct_decimal = sl_pct / 100
 
-        # Skip if SL is too tight - profits would be tiny even with leverage
-        if sl_pct < MIN_SL_PCT:
-            continue  # SL too tight, skip this trade
+        # min_leverage = risk_pct / (sl_pct * max_margin_pct)
+        min_leverage_needed = (RISK_PER_TRADE_PCT / 100) / (sl_pct_decimal * MAX_MARGIN_PCT)
 
-        leverage = min(MAX_LEVERAGE, max(5, int(RISK_PER_TRADE_PCT / sl_pct)))
+        if min_leverage_needed > MAX_LEVERAGE:
+            # Can't achieve 2% risk within constraints - skip
+            continue
+
+        # Use minimum leverage that achieves target (round up)
+        leverage = min(MAX_LEVERAGE, max(5, int(min_leverage_needed) + 1))
 
         active_trade = ScalpTrade(
             symbol=symbol,

@@ -934,17 +934,44 @@ def run_scalper_live():
                         equity = balance.get('available', 0)
                         sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
 
-                        # Calculate qty based on risk
+                        # === DYNAMIC POSITION SIZING ===
+                        # Goal: Always achieve exactly RISK_PER_TRADE_PCT risk (2%)
+                        # Balance between leverage (max 50x) and margin (max 50% of equity)
+                        MAX_LEVERAGE_LIMIT = 50  # Our max leverage limit
+                        MAX_MARGIN_PCT = 0.50    # Max 50% of equity per trade
+
+                        # Get coin's max leverage from Bybit
+                        coin_max_leverage = executor.get_max_leverage(signal.symbol)
+                        max_leverage = min(MAX_LEVERAGE_LIMIT, coin_max_leverage)
+
+                        # Calculate required position for 2% risk
                         risk_usd = equity * (RISK_PER_TRADE_PCT / 100)
-                        qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
+                        sl_pct_decimal = sl_pct / 100
+                        position_usd_needed = risk_usd / sl_pct_decimal  # Notional needed for 2% risk
 
-                        # Cap position size - divide by max positions so all can fit
-                        max_positions = MAX_LONGS + MAX_SHORTS  # e.g. 2+2=4
-                        max_position_usd = (equity * 0.8 / max_positions) * signal.leverage
-                        if qty_usd > max_position_usd:
-                            qty_usd = max_position_usd
-                            print(f"  [CAP] Position capped to ${qty_usd:.0f} (1/{max_positions} of margin)", flush=True)
+                        # Calculate minimum leverage needed to stay within margin limit
+                        # margin = position / leverage <= max_margin_pct * equity
+                        # leverage >= position / (max_margin_pct * equity)
+                        min_leverage_needed = position_usd_needed / (MAX_MARGIN_PCT * equity) if equity > 0 else 999
 
+                        if min_leverage_needed > max_leverage:
+                            # Can't achieve 2% risk within constraints - skip this trade
+                            print(f"  [SKIP] Can't achieve 2% risk: need {min_leverage_needed:.0f}x lev, max {max_leverage}x", flush=True)
+                            if ob_key:
+                                used_obs.discard(ob_key)
+                            continue
+
+                        # Use minimum leverage that achieves target (round up to be safe)
+                        leverage = min(max_leverage, max(5, int(min_leverage_needed) + 1))
+                        signal.leverage = leverage  # Update signal with dynamic leverage
+
+                        # Calculate actual margin used
+                        margin_usd = position_usd_needed / leverage
+                        margin_pct = margin_usd / equity * 100
+
+                        print(f"  [DYNAMIC] SL={sl_pct:.2f}%, Lev={leverage}x, Margin={margin_pct:.1f}%, Risk={RISK_PER_TRADE_PCT}%", flush=True)
+
+                        qty_usd = position_usd_needed
                         qty = qty_usd / signal.entry_price if signal.entry_price > 0 else 0
 
                         # Round to appropriate precision (most coins: 0-3 decimals)
