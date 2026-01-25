@@ -635,7 +635,21 @@ def run_scalper_live():
     )
 
     # === BATCH SCAN: Scan all coins, then pick best signals ===
-    SCAN_DELAY = float(os.getenv('SCAN_DELAY', '2.5'))  # seconds between each coin
+    SCAN_DELAY = float(os.getenv('SCAN_DELAY', '0.5'))  # seconds between each coin (0.5 = safe for API)
+    SYNC_TO_CANDLE = os.getenv('SYNC_TO_CANDLE', 'true').lower() == 'true'  # Sync scan to candle close
+
+    def wait_for_candle_close():
+        """Wait for next 1-minute candle close (second 2-3 of new minute)"""
+        now = datetime.utcnow()
+        # Calculate seconds until next minute + 2 seconds buffer for data to settle
+        seconds_to_wait = 60 - now.second + 2
+        if seconds_to_wait > 60:
+            seconds_to_wait -= 60
+        if seconds_to_wait > 0:
+            print(f"\n[SYNC] Waiting {seconds_to_wait}s for candle close...", flush=True)
+            time.sleep(seconds_to_wait)
+        return datetime.utcnow()
+
     coin_index = 0
     last_status_time = time.time()
     STATUS_INTERVAL = 60  # Status update every 60 seconds
@@ -649,7 +663,13 @@ def run_scalper_live():
 
     while True:
         try:
-            now = datetime.utcnow()
+            # === SYNC TO CANDLE CLOSE (start of each cycle) ===
+            if SYNC_TO_CANDLE and coin_index == 0:
+                now = wait_for_candle_close()
+                print(f"[SCAN] Starting cycle at {now.strftime('%H:%M:%S')}", flush=True)
+            else:
+                now = datetime.utcnow()
+
             symbol = coins[coin_index]
 
             # Skip coins that timed out previously
