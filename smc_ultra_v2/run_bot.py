@@ -604,6 +604,22 @@ def run_scalper_live():
 
             stats = candle_streamer.get_stats()
             print(f"[STARTUP] WebSocket ready: {stats['symbols_5m']} coins streaming", flush=True)
+
+            # === PRELOAD 4H + DAILY DATA (still needs API, but only once!) ===
+            print("[STARTUP] Preloading 4H + Daily data (one-time API calls)...", flush=True)
+            preload_errors = 0
+            for i, coin in enumerate(coins):
+                try:
+                    # This will cache the data for 1h (4H) and 4h (Daily)
+                    scanner._get_cached(coin, "240", 14)  # 4H
+                    scanner._get_cached(coin, "D", 30)    # Daily
+                    if (i + 1) % 20 == 0:
+                        print(f"  [PRELOAD] {i + 1}/{len(coins)} coins...", flush=True)
+                    time.sleep(0.3)  # Rate limit protection
+                except Exception as e:
+                    preload_errors += 1
+            print(f"[STARTUP] Preload complete ({len(coins) - preload_errors}/{len(coins)} coins)", flush=True)
+
         except Exception as e:
             print(f"[WARN] WebSocket failed: {e} - falling back to API", flush=True)
             USE_WEBSOCKET = False
