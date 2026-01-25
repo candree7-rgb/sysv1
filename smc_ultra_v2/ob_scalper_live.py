@@ -40,6 +40,9 @@ MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # 30 min like bac
 MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
 USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
 
+# Minimum SL distance - skip trades where SL is too tight (tiny profits)
+MIN_SL_PCT = float(os.getenv('MIN_SL_PCT', '0.5'))  # Minimum 0.5% SL distance
+
 # MTF Filters
 USE_4H_MTF = os.getenv('USE_4H_MTF', 'true').lower() == 'true'
 USE_DAILY_FOR_SHORTS = os.getenv('USE_DAILY_FOR_SHORTS', 'true').lower() == 'true'
@@ -522,6 +525,13 @@ class OBScalperLive:
 
             # Calculate leverage (same as backtest)
             sl_pct = abs(entry - sl) / entry * 100
+
+            # Skip if SL is too tight - profits would be tiny
+            if sl_pct < MIN_SL_PCT:
+                if debug:
+                    print(f"      {symbol}: SKIP - SL too tight ({sl_pct:.2f}% < {MIN_SL_PCT}%)")
+                return None
+
             leverage = min(MAX_LEVERAGE, max(5, int(RISK_PER_TRADE_PCT / sl_pct)))
 
             # Partial TP price

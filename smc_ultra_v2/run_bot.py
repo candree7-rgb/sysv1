@@ -965,16 +965,24 @@ def run_scalper_live():
 
                             # === PARTIAL TP: Split into 2 orders (like backtest) ===
                             if signal.use_partial_tp and signal.partial_tp_price:
-                                qty1 = qty * signal.partial_size  # First 50%
-                                qty2 = qty - qty1  # Remaining 50%
+                                # IMPORTANT: Round qty1 first, then qty2 = qty - qty1
+                                # This ensures qty1 + qty2 = qty exactly (no residual position)
+                                qty1_raw = qty * signal.partial_size  # First 50%
 
-                                # Round quantities
+                                # Round qty1 only, derive qty2 from remainder
                                 if signal.entry_price > 100:
-                                    qty1, qty2 = round(qty1, 2), round(qty2, 2)
+                                    qty1 = round(qty1_raw, 2)
+                                    qty2 = round(qty - qty1, 2)  # Remainder gets same precision
                                 elif signal.entry_price > 1:
-                                    qty1, qty2 = round(qty1, 1), round(qty2, 1)
+                                    qty1 = round(qty1_raw, 1)
+                                    qty2 = round(qty - qty1, 1)
                                 else:
-                                    qty1, qty2 = round(qty1, 0), round(qty2, 0)
+                                    qty1 = round(qty1_raw, 0)
+                                    qty2 = round(qty - qty1, 0)
+
+                                # Safety: ensure we don't exceed original qty
+                                if qty1 + qty2 > qty:
+                                    qty2 = qty - qty1
 
                                 print(f"  [PARTIAL] Order1: {qty1} @ TP1={signal.partial_tp_price:.4f}", flush=True)
                                 print(f"  [PARTIAL] Order2: {qty2} @ TP2={signal.tp_price:.4f}", flush=True)

@@ -41,6 +41,9 @@ MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # 30 min like liv
 MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
 USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
 
+# Minimum SL distance - skip trades where SL is too tight (tiny profits even with leverage)
+MIN_SL_PCT = float(os.getenv('MIN_SL_PCT', '0.5'))  # Minimum 0.5% SL distance
+
 # RSI Filter - DISABLED by default (too restrictive, filters good trades)
 RSI_LONG_MAX = int(os.getenv('RSI_LONG_MAX', '45'))
 RSI_SHORT_MIN = int(os.getenv('RSI_SHORT_MIN', '55'))
@@ -672,6 +675,11 @@ def run_backtest(
 
         # Calculate dynamic leverage based on SL distance
         sl_pct = abs(entry - sl) / entry * 100
+
+        # Skip if SL is too tight - profits would be tiny even with leverage
+        if sl_pct < MIN_SL_PCT:
+            continue  # SL too tight, skip this trade
+
         leverage = min(MAX_LEVERAGE, max(5, int(RISK_PER_TRADE_PCT / sl_pct)))
 
         active_trade = ScalpTrade(
