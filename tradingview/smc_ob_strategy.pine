@@ -31,9 +31,10 @@ i_ob_strength   = input.float(0.8, "Min OB Strength", minval=0.5, maxval=1.0, st
 i_ob_mitigation = input.string("Close", "Mitigation Method", options=["Touch", "Wick", "Close"], group=grp_ob)
 i_internal_len  = input.int(5, "Internal Structure Length", minval=2, maxval=20, group=grp_ob)
 
-// OB Colors
-i_ob_bull_css   = input.color(color.new(#089981, 80), "Bullish OB Color", group=grp_ob)
-i_ob_bear_css   = input.color(color.new(#f23645, 80), "Bearish OB Color", group=grp_ob)
+// OB Colors - Default: Bullish=Green, Bearish=Red
+i_ob_bull_css   = input.color(color.new(#00C853, 85), "Bullish OB Color", group=grp_ob)  // Bright Green
+i_ob_bear_css   = input.color(color.new(#FF5252, 85), "Bearish OB Color", group=grp_ob)  // Bright Red
+i_ob_show_labels = input.bool(true, "Show OB Labels", group=grp_ob)
 
 //=============================================================================
 // INPUTS - MTF (Multi-Timeframe) Filter
@@ -423,32 +424,80 @@ if strategy.position_size < 0  // Short position
         strategy.exit("Short Exit", "Short", stop=current_sl, limit=tp1_price)
 
 //=============================================================================
-// VISUALS - Order Block Boxes
+// VISUALS - Order Block Boxes (Fixed/Persistent)
 //=============================================================================
 
-// Draw bullish OBs
-if i_ob_show and barstate.islast
+// Store box and label references for persistence
+var array<box> bull_boxes = array.new_box(0)
+var array<box> bear_boxes = array.new_box(0)
+var array<label> bull_labels = array.new_label(0)
+var array<label> bear_labels = array.new_label(0)
+
+// Clean up old boxes/labels and redraw on each bar
+if i_ob_show
+    // Delete old bullish boxes and labels
+    for i = 0 to array.size(bull_boxes) - 1
+        box.delete(array.get(bull_boxes, i))
+    array.clear(bull_boxes)
+    for i = 0 to array.size(bull_labels) - 1
+        label.delete(array.get(bull_labels, i))
+    array.clear(bull_labels)
+
+    // Delete old bearish boxes and labels
+    for i = 0 to array.size(bear_boxes) - 1
+        box.delete(array.get(bear_boxes, i))
+    array.clear(bear_boxes)
+    for i = 0 to array.size(bear_labels) - 1
+        label.delete(array.get(bear_labels, i))
+    array.clear(bear_labels)
+
+    // Draw bullish OBs - FIXED GREEN boxes (user configurable color)
     for i = 0 to math.min(array.size(bull_ob_top) - 1, i_ob_num - 1)
         ob_top = array.get(bull_ob_top, i)
         ob_btm = array.get(bull_ob_btm, i)
         ob_bar = array.get(bull_ob_bar, i)
+        ob_age = bar_index - ob_bar
 
-        box.new(ob_bar, ob_top, bar_index + 10, ob_btm,
-                border_color=color.new(#089981, 50),
-                bgcolor=i_ob_bull_css,
+        // Create persistent green box for bullish OB
+        new_box = box.new(ob_bar, ob_top, bar_index + 50, ob_btm,
+                border_color=color.new(#00C853, 30),         // Strong green border
+                bgcolor=i_ob_bull_css,                       // User configurable fill
+                border_width=2,
                 xloc=xloc.bar_index)
+        array.push(bull_boxes, new_box)
 
-// Draw bearish OBs
-if i_ob_show and barstate.islast
+        // Add label for bullish OB with age info (optional)
+        if i_ob_show_labels
+            new_label = label.new(ob_bar, ob_top, "BULL OB (" + str.tostring(ob_age) + ")",
+                      color=color.new(#00C853, 50),
+                      textcolor=color.white,
+                      style=label.style_label_down,
+                      size=size.tiny)
+            array.push(bull_labels, new_label)
+
+    // Draw bearish OBs - FIXED RED boxes (user configurable color)
     for i = 0 to math.min(array.size(bear_ob_top) - 1, i_ob_num - 1)
         ob_top = array.get(bear_ob_top, i)
         ob_btm = array.get(bear_ob_btm, i)
         ob_bar = array.get(bear_ob_bar, i)
+        ob_age = bar_index - ob_bar
 
-        box.new(ob_bar, ob_top, bar_index + 10, ob_btm,
-                border_color=color.new(#f23645, 50),
-                bgcolor=i_ob_bear_css,
+        // Create persistent red box for bearish OB
+        new_box = box.new(ob_bar, ob_top, bar_index + 50, ob_btm,
+                border_color=color.new(#FF5252, 30),         // Strong red border
+                bgcolor=i_ob_bear_css,                       // User configurable fill
+                border_width=2,
                 xloc=xloc.bar_index)
+        array.push(bear_boxes, new_box)
+
+        // Add label for bearish OB with age info (optional)
+        if i_ob_show_labels
+            new_label = label.new(ob_bar, ob_btm, "BEAR OB (" + str.tostring(ob_age) + ")",
+                      color=color.new(#FF5252, 50),
+                      textcolor=color.white,
+                      style=label.style_label_up,
+                      size=size.tiny)
+            array.push(bear_labels, new_label)
 
 //=============================================================================
 // PLOTS
