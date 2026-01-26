@@ -435,69 +435,75 @@ var array<label> bear_labels = array.new_label(0)
 
 // Clean up old boxes/labels and redraw on each bar
 if i_ob_show
-    // Delete old bullish boxes and labels
-    for i = 0 to array.size(bull_boxes) - 1
-        box.delete(array.get(bull_boxes, i))
-    array.clear(bull_boxes)
-    for i = 0 to array.size(bull_labels) - 1
-        label.delete(array.get(bull_labels, i))
-    array.clear(bull_labels)
+    // Delete old bullish boxes and labels (only if arrays have elements)
+    if array.size(bull_boxes) > 0
+        for i = 0 to array.size(bull_boxes) - 1
+            box.delete(array.get(bull_boxes, i))
+        array.clear(bull_boxes)
+    if array.size(bull_labels) > 0
+        for i = 0 to array.size(bull_labels) - 1
+            label.delete(array.get(bull_labels, i))
+        array.clear(bull_labels)
 
-    // Delete old bearish boxes and labels
-    for i = 0 to array.size(bear_boxes) - 1
-        box.delete(array.get(bear_boxes, i))
-    array.clear(bear_boxes)
-    for i = 0 to array.size(bear_labels) - 1
-        label.delete(array.get(bear_labels, i))
-    array.clear(bear_labels)
+    // Delete old bearish boxes and labels (only if arrays have elements)
+    if array.size(bear_boxes) > 0
+        for i = 0 to array.size(bear_boxes) - 1
+            box.delete(array.get(bear_boxes, i))
+        array.clear(bear_boxes)
+    if array.size(bear_labels) > 0
+        for i = 0 to array.size(bear_labels) - 1
+            label.delete(array.get(bear_labels, i))
+        array.clear(bear_labels)
 
-    // Draw bullish OBs - FIXED GREEN boxes (user configurable color)
-    for i = 0 to math.min(array.size(bull_ob_top) - 1, i_ob_num - 1)
-        ob_top = array.get(bull_ob_top, i)
-        ob_btm = array.get(bull_ob_btm, i)
-        ob_bar = array.get(bull_ob_bar, i)
-        ob_age = bar_index - ob_bar
+    // Draw bullish OBs - FIXED GREEN boxes (only if OBs exist)
+    if array.size(bull_ob_top) > 0
+        for i = 0 to math.min(array.size(bull_ob_top) - 1, i_ob_num - 1)
+            ob_top = array.get(bull_ob_top, i)
+            ob_btm = array.get(bull_ob_btm, i)
+            ob_bar = array.get(bull_ob_bar, i)
+            ob_age = bar_index - ob_bar
 
-        // Create persistent green box for bullish OB
-        new_box = box.new(ob_bar, ob_top, bar_index + 50, ob_btm,
-                border_color=color.new(#00C853, 30),         // Strong green border
-                bgcolor=i_ob_bull_css,                       // User configurable fill
-                border_width=2,
-                xloc=xloc.bar_index)
-        array.push(bull_boxes, new_box)
+            // Create persistent green box for bullish OB
+            new_box = box.new(ob_bar, ob_top, bar_index + 50, ob_btm,
+                    border_color=color.new(#00C853, 30),         // Strong green border
+                    bgcolor=i_ob_bull_css,                       // User configurable fill
+                    border_width=2,
+                    xloc=xloc.bar_index)
+            array.push(bull_boxes, new_box)
 
-        // Add label for bullish OB with age info (optional)
-        if i_ob_show_labels
-            new_label = label.new(ob_bar, ob_top, "BULL OB (" + str.tostring(ob_age) + ")",
-                      color=color.new(#00C853, 50),
-                      textcolor=color.white,
-                      style=label.style_label_down,
-                      size=size.tiny)
-            array.push(bull_labels, new_label)
+            // Add label for bullish OB with age info (optional)
+            if i_ob_show_labels
+                new_label = label.new(ob_bar, ob_top, "BULL OB (" + str.tostring(ob_age) + ")",
+                          color=color.new(#00C853, 50),
+                          textcolor=color.white,
+                          style=label.style_label_down,
+                          size=size.tiny)
+                array.push(bull_labels, new_label)
 
-    // Draw bearish OBs - FIXED RED boxes (user configurable color)
-    for i = 0 to math.min(array.size(bear_ob_top) - 1, i_ob_num - 1)
-        ob_top = array.get(bear_ob_top, i)
-        ob_btm = array.get(bear_ob_btm, i)
-        ob_bar = array.get(bear_ob_bar, i)
-        ob_age = bar_index - ob_bar
+    // Draw bearish OBs - FIXED RED boxes (only if OBs exist)
+    if array.size(bear_ob_top) > 0
+        for i = 0 to math.min(array.size(bear_ob_top) - 1, i_ob_num - 1)
+            ob_top = array.get(bear_ob_top, i)
+            ob_btm = array.get(bear_ob_btm, i)
+            ob_bar = array.get(bear_ob_bar, i)
+            ob_age = bar_index - ob_bar
 
-        // Create persistent red box for bearish OB
-        new_box = box.new(ob_bar, ob_top, bar_index + 50, ob_btm,
-                border_color=color.new(#FF5252, 30),         // Strong red border
-                bgcolor=i_ob_bear_css,                       // User configurable fill
-                border_width=2,
-                xloc=xloc.bar_index)
-        array.push(bear_boxes, new_box)
+            // Create persistent red box for bearish OB
+            new_box = box.new(ob_bar, ob_top, bar_index + 50, ob_btm,
+                    border_color=color.new(#FF5252, 30),         // Strong red border
+                    bgcolor=i_ob_bear_css,                       // User configurable fill
+                    border_width=2,
+                    xloc=xloc.bar_index)
+            array.push(bear_boxes, new_box)
 
-        // Add label for bearish OB with age info (optional)
-        if i_ob_show_labels
-            new_label = label.new(ob_bar, ob_btm, "BEAR OB (" + str.tostring(ob_age) + ")",
-                      color=color.new(#FF5252, 50),
-                      textcolor=color.white,
-                      style=label.style_label_up,
-                      size=size.tiny)
-            array.push(bear_labels, new_label)
+            // Add label for bearish OB with age info (optional)
+            if i_ob_show_labels
+                new_label = label.new(ob_bar, ob_btm, "BEAR OB (" + str.tostring(ob_age) + ")",
+                          color=color.new(#FF5252, 50),
+                          textcolor=color.white,
+                          style=label.style_label_up,
+                          size=size.tiny)
+                array.push(bear_labels, new_label)
 
 //=============================================================================
 // PLOTS
