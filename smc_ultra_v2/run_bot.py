@@ -349,7 +349,13 @@ def run_scalper_live():
     trade_pairs = {}
 
     def on_order_update(message):
-        """Handle order fill events - move SL to BE after TP1 + SL safety check"""
+        """Handle order fill events - ENTRY fill detection + SL safety check
+
+        IMPORTANT: The order IDs we track (order1, order2) are ENTRY order IDs,
+        NOT TP order IDs! When entry fills, Bybit creates separate conditional
+        TP/SL orders with different IDs. TP detection is done via position
+        monitoring in the status loop, NOT here.
+        """
         try:
             if 'data' not in message:
                 return
@@ -358,118 +364,151 @@ def run_scalper_live():
                 order_id = order_data.get('orderId', '')
                 symbol = order_data.get('symbol', '')
                 status = order_data.get('orderStatus', '')
+                reduce_only = order_data.get('reduceOnly', False)
+                order_type = order_data.get('orderType', '')
+                side = order_data.get('side', '')
 
                 # Only care about filled orders
                 if status != 'Filled':
                     continue
 
                 # === SAFETY: Check if position has SL after any fill ===
-                # Small delay to let the order settle
-                time.sleep(0.5)
-                has_sl, current_sl, entry_price, side = executor.check_position_has_sl(symbol)
-                if not has_sl and entry_price:
-                    print(f"\n  [DANGER] {symbol} has NO SL! Setting emergency SL...", flush=True)
-                    executor.set_emergency_sl(symbol, entry_price, side, max_loss_pct=2.0)
+                # Skip for tracked trades - they have order-attached TP/SL already
+                if symbol not in trade_pairs:
+                    # Unknown position - check if it has SL protection
+                    time.sleep(0.5)
+                    has_sl, current_sl, entry_price_pos, pos_side = executor.check_position_has_sl(symbol)
+                    if not has_sl and entry_price_pos:
+                        print(f"\n  [DANGER] {symbol} has NO SL! Setting emergency SL...", flush=True)
+                        executor.set_emergency_sl(symbol, entry_price_pos, pos_side, max_loss_pct=2.0)
 
-                # Check if this is part of a trade pair
+                # Check if this is part of a tracked trade
                 if symbol not in trade_pairs:
                     continue
 
                 pair = trade_pairs[symbol]
 
-                # Check if TP1 order was filled (order1)
-                if order_id == pair.get('order1') and not pair.get('tp1_filled'):
-                    pair['tp1_filled'] = True
+                # === DETECT ENTRY FILLS ===
+                # Entry orders are NOT reduceOnly and match our tracked order IDs
+                is_entry_order = order_id in [pair.get('order1'), pair.get('order2')]
+
+                if is_entry_order and not reduce_only:
+                    # This is an ENTRY order filling, NOT a TP!
+                    if not pair.get('entry_filled'):
+                        pair['entry_filled'] = True
+                        pair['initial_qty'] = pair.get('qty', 0)
+                        print(f"\n  [ENTRY FILL] {symbol} - Position opened, tracking for TP/SL", flush=True)
+                    continue  # Don't process further - TP detection is done in status loop
+
+                # === DETECT TP/SL FILLS (reduceOnly orders) ===
+                # These are the actual TP/SL orders that Bybit created
+                if reduce_only and pair.get('entry_filled'):
+                    # Get current position to check what happened
+                    pos = executor.get_position(symbol)
                     entry_price = pair['entry']
                     direction = pair['direction']
 
-                    # Move SL to lock in tiny profit (0.1%) - exactly like backtest
-                    if direction == 'long':
-                        new_sl = entry_price * 1.001  # 0.1% above entry
-                    else:
-                        new_sl = entry_price * 0.999  # 0.1% below entry
+                    if pos is None:
+                        # Position fully closed - determine if TP2 or SL
+                        # Get the fill price from the order data
+                        fill_price = float(order_data.get('avgPrice', order_data.get('price', entry_price)))
+                        tp2_price = pair.get('tp2_price', entry_price)
+                        sl_price = pair.get('sl_price', entry_price)
 
-                    print(f"\n  [TP1 HIT] {symbol} - Moving SL to BE+ ({new_sl:.6f})", flush=True)
-
-                    # Move SL to lock in tiny profit for remaining position
-                    try:
-                        # Use set_trading_stop to modify position SL
-                        response = executor.client.set_trading_stop(
-                            category="linear",
-                            symbol=symbol,
-                            stopLoss=str(round(new_sl, 6)),
-                            slTriggerBy="LastPrice",
-                            positionIdx=0
-                        )
-                        if response['retCode'] == 0:
-                            print(f"  [BE+ SET] {symbol} SL → {new_sl:.6f} (0.1% locked)", flush=True)
-
-                            # Send TP1 Telegram alert
-                            tp1_price = pair.get('tp1_price', entry_price)
-                            if direction == 'long':
-                                partial_pnl = (tp1_price - entry_price) / entry_price * 100
-                            else:
-                                partial_pnl = (entry_price - tp1_price) / entry_price * 100
-                            tg.send_tp1_hit(symbol, direction, entry_price, tp1_price, partial_pnl)
+                        # Check if exit was near TP2 or SL
+                        if direction == 'long':
+                            near_tp2 = fill_price >= tp2_price * 0.998  # Within 0.2% of TP2
+                            near_sl = fill_price <= sl_price * 1.002
+                            pnl_pct = (fill_price - entry_price) / entry_price * 100
                         else:
-                            print(f"  [WARN] SL modify failed: {response.get('retMsg', 'unknown')}", flush=True)
-                    except Exception as e:
-                        print(f"  [ERR] SL modify: {str(e)[:50]}", flush=True)
+                            near_tp2 = fill_price <= tp2_price * 1.002
+                            near_sl = fill_price >= sl_price * 0.998
+                            pnl_pct = (entry_price - fill_price) / entry_price * 100
 
-                # Check if TP2 order was filled (order2) - trade complete
-                elif order_id == pair.get('order2'):
-                    print(f"\n  [TP2 HIT] {symbol} - Trade complete!", flush=True)
+                        if near_tp2 and pnl_pct > 0:
+                            print(f"\n  [TP2 HIT] {symbol} - Trade complete! PnL: {pnl_pct:.2f}%", flush=True)
+                            exit_reason = 'tp2'
+                            tp_hits = '2/2' if pair.get('tp1_filled') else '1/2'
+                        else:
+                            exit_type = 'be+' if pair.get('tp1_filled') else 'sl'
+                            print(f"\n  [{exit_type.upper()} HIT] {symbol} - Exit at {fill_price:.6f}, PnL: {pnl_pct:.2f}%", flush=True)
+                            exit_reason = exit_type
+                            tp_hits = '1/2' if pair.get('tp1_filled') else '0/2'
 
-                    # Log exit to Supabase
-                    if pair.get('db_trade_id'):
+                        # Log exit
+                        if pair.get('db_trade_id'):
+                            try:
+                                balance = executor.get_balance()
+                                equity_now = balance.get('available', 0)
+                                margin = pair.get('margin_used', 0)
+                                realized_pnl = margin * (pnl_pct / 100) if margin else 0
+
+                                trade_logger.log_exit(
+                                    trade_id=pair['db_trade_id'],
+                                    exit_price=fill_price,
+                                    exit_time=datetime.utcnow(),
+                                    exit_reason=exit_reason,
+                                    realized_pnl=realized_pnl,
+                                    equity_at_close=equity_now,
+                                    tp1_hit=pair.get('tp1_filled', False),
+                                    tp2_hit=(exit_reason == 'tp2'),
+                                    entry_time=pair.get('entry_time'),
+                                    margin_used=margin,
+                                )
+
+                                # Send Telegram alert
+                                duration_mins = None
+                                if pair.get('entry_time'):
+                                    duration_mins = int((datetime.utcnow() - pair['entry_time']).total_seconds() / 60)
+                                tg.send_trade_closed(
+                                    symbol=symbol,
+                                    direction=direction,
+                                    entry_price=entry_price,
+                                    exit_price=fill_price,
+                                    pnl_pct=pnl_pct,
+                                    exit_reason=exit_reason,
+                                    tp_hits=tp_hits,
+                                    duration_mins=duration_mins,
+                                )
+                            except Exception as e:
+                                print(f"  [DB ERR] {str(e)[:40]}", flush=True)
+
+                        del trade_pairs[symbol]
+
+                    elif pos.size < pair.get('initial_qty', 0) * 0.7 and not pair.get('tp1_filled'):
+                        # Position size reduced significantly - TP1 hit!
+                        pair['tp1_filled'] = True
+
+                        # Move SL to BE+ for remaining position
+                        if direction == 'long':
+                            new_sl = entry_price * 1.001  # 0.1% above entry
+                        else:
+                            new_sl = entry_price * 0.999  # 0.1% below entry
+
+                        print(f"\n  [TP1 HIT] {symbol} - Moving SL to BE+ ({new_sl:.6f})", flush=True)
+
                         try:
-                            balance = executor.get_balance()
-                            equity_now = balance.get('available', 0)
-
-                            # Calculate PnL (approximate)
-                            entry = pair['entry']
-                            tp2 = pair.get('tp2_price', entry)
-                            direction = pair['direction']
-                            margin = pair.get('margin_used', 0)
-
-                            if direction == 'long':
-                                pnl_pct = (tp2 - entry) / entry * 100
-                            else:
-                                pnl_pct = (entry - tp2) / entry * 100
-
-                            realized_pnl = margin * (pnl_pct / 100) * pair.get('qty', 0) / margin if margin else 0
-
-                            trade_logger.log_exit(
-                                trade_id=pair['db_trade_id'],
-                                exit_price=tp2,
-                                exit_time=datetime.utcnow(),
-                                exit_reason='tp2',
-                                realized_pnl=realized_pnl,
-                                equity_at_close=equity_now,
-                                tp1_hit=pair.get('tp1_filled', False),
-                                tp2_hit=True,
-                                entry_time=pair.get('entry_time'),
-                                margin_used=margin,
-                            )
-
-                            # Send Telegram close alert
-                            duration_mins = None
-                            if pair.get('entry_time'):
-                                duration_mins = int((datetime.utcnow() - pair['entry_time']).total_seconds() / 60)
-                            tg.send_trade_closed(
+                            response = executor.client.set_trading_stop(
+                                category="linear",
                                 symbol=symbol,
-                                direction=direction,
-                                entry_price=entry,
-                                exit_price=tp2,
-                                pnl_pct=pnl_pct,
-                                exit_reason='tp2',
-                                tp_hits='2/2' if pair.get('tp1_filled') else '1/2',
-                                duration_mins=duration_mins,
+                                stopLoss=str(round(new_sl, 6)),
+                                slTriggerBy="LastPrice",
+                                positionIdx=0
                             )
-                        except Exception as e:
-                            print(f"  [DB ERR] {str(e)[:40]}", flush=True)
+                            if response['retCode'] == 0:
+                                print(f"  [BE+ SET] {symbol} SL → {new_sl:.6f} (0.1% locked)", flush=True)
 
-                    del trade_pairs[symbol]
+                                # Send TP1 Telegram alert
+                                tp1_price = pair.get('tp1_price', entry_price)
+                                if direction == 'long':
+                                    partial_pnl = (tp1_price - entry_price) / entry_price * 100
+                                else:
+                                    partial_pnl = (entry_price - tp1_price) / entry_price * 100
+                                tg.send_tp1_hit(symbol, direction, entry_price, tp1_price, partial_pnl)
+                            else:
+                                print(f"  [WARN] SL modify failed: {response.get('retMsg', 'unknown')}", flush=True)
+                        except Exception as e:
+                            print(f"  [ERR] SL modify: {str(e)[:50]}", flush=True)
 
         except Exception as e:
             print(f"  [WS ERR] {str(e)[:50]}", flush=True)
@@ -542,9 +581,94 @@ def run_scalper_live():
     print(f"Max positions: {MAX_LONGS} longs, {MAX_SHORTS} shorts", flush=True)
     print("=" * 60, flush=True)
 
-    # Skip preload - let cache build naturally during scans
-    # First few scans will be slower but won't hang
-    print("\n[STARTUP] Starting scans (HTF cache builds automatically)...", flush=True)
+    # === START WEBSOCKET CANDLE STREAMER ===
+    # Streams 5m and 1h candles for all coins in real-time
+    # Scanner reads from cache = no API calls during scan!
+    USE_WEBSOCKET = os.getenv('USE_WEBSOCKET', 'true').lower() == 'true'
+    candle_streamer = None
+
+    if USE_WEBSOCKET:
+        print("\n[STARTUP] Starting WebSocket candle streamer...", flush=True)
+        try:
+            from live.candle_streamer import start_candle_streamer
+            candle_streamer = start_candle_streamer(coins, testnet=USE_TESTNET)
+
+            # Wait for initial data to stream in
+            print("[STARTUP] Waiting for WebSocket data (30s warmup)...", flush=True)
+            for i in range(6):  # 6 x 5 seconds = 30 seconds
+                time.sleep(5)
+                stats = candle_streamer.get_stats()
+                print(f"  [WS] {stats['symbols_5m']}/{len(coins)} coins with 5m data, {stats['updates_received']} updates", flush=True)
+                if stats['symbols_5m'] >= len(coins) * 0.8:  # 80% of coins have data
+                    break
+
+            stats = candle_streamer.get_stats()
+            print(f"[STARTUP] WebSocket ready: {stats['symbols_5m']} coins streaming", flush=True)
+
+            # === PRELOAD 4H + DAILY DATA (still needs API, but only once!) ===
+            print("[STARTUP] Preloading 4H + Daily data (one-time API calls)...", flush=True)
+            import multiprocessing as mp
+
+            # Known problematic coins - SAME AS DOWNLOAD (these ALWAYS hang)
+            PRELOAD_SKIP = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT',
+                           'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT', 'FHEUSDT', 'SKRUSDT',
+                           'ELSAUSDT', 'FIGHTUSDT', 'SPACEUSDT', 'ACUUSDT', 'XUSDT',
+                           '1000CATUSDT', '1000CHEEMSUSDT', 'COWUSDT', 'POPCATUSDT'}
+
+            # Filter coins FIRST (don't even try problematic ones)
+            preload_coins = [c for c in coins if c not in PRELOAD_SKIP]
+            skipped_count = len(coins) - len(preload_coins)
+            if skipped_count > 0:
+                print(f"  [SKIP] {skipped_count} known problematic coins", flush=True)
+
+            preload_errors = 0
+            preload_timeout = []
+
+            def _preload_worker(coin, queue):
+                """Worker process for preloading one coin"""
+                try:
+                    from ob_scalper_live import OBScalperLive
+                    s = OBScalperLive()
+                    s._get_cached(coin, "240", 14)  # 4H
+                    s._get_cached(coin, "D", 30)    # Daily
+                    queue.put(('ok', coin))
+                except Exception as e:
+                    queue.put(('error', str(e)[:30]))
+
+            for i, coin in enumerate(preload_coins):
+                try:
+                    # Use subprocess with hard timeout (can kill if hangs)
+                    result_queue = mp.Queue()
+                    proc = mp.Process(target=_preload_worker, args=(coin, result_queue))
+                    proc.start()
+                    proc.join(timeout=8)  # 8 sec max per coin
+
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join()
+                        preload_timeout.append(coin)
+                        preload_errors += 1
+                    elif not result_queue.empty():
+                        status, _ = result_queue.get_nowait()
+                        if status != 'ok':
+                            preload_errors += 1
+
+                    if (i + 1) % 20 == 0:
+                        print(f"  [PRELOAD] {i + 1}/{len(preload_coins)} coins...", flush=True)
+
+                except Exception as e:
+                    preload_errors += 1
+
+            success = len(preload_coins) - preload_errors
+            print(f"[STARTUP] Preload complete ({success}/{len(preload_coins)} coins)", flush=True)
+            if preload_timeout:
+                print(f"  [TIMEOUT] {', '.join(preload_timeout[:5])}{'...' if len(preload_timeout) > 5 else ''}", flush=True)
+
+        except Exception as e:
+            print(f"[WARN] WebSocket failed: {e} - falling back to API", flush=True)
+            USE_WEBSOCKET = False
+    else:
+        print("\n[STARTUP] WebSocket disabled, using API for candle data", flush=True)
 
     # Track pending orders: {order_id: {'symbol': str, 'placed_at': datetime, 'direction': str}}
     pending_orders = {}
@@ -595,27 +719,71 @@ def run_scalper_live():
         pending_orders=len(pending_orders),
     )
 
-    # === BATCH SCAN: Scan all coins, then pick best signals ===
-    SCAN_DELAY = float(os.getenv('SCAN_DELAY', '2.5'))  # seconds between each coin
+    # === SEQUENTIAL SCAN: One coin at a time with subprocess timeout ===
+    SCAN_DELAY = float(os.getenv('SCAN_DELAY', '0.5'))  # seconds between coins
+    SYNC_TO_CANDLE = os.getenv('SYNC_TO_CANDLE', 'true').lower() == 'true'
+    SCAN_TIMEOUT = 15  # seconds per coin
+
+    # Known problematic coins that always hang
+    SCAN_SKIP = {'APEUSDT', 'MATICUSDT', 'OCEANUSDT', 'EOSUSDT', 'RNDRUSDT',
+                 'FETUSDT', 'AGIXUSDT', 'MKRUSDT', 'FOGOUSDT', 'FHEUSDT', 'SKRUSDT',
+                 'ELSAUSDT', 'FIGHTUSDT', 'SPACEUSDT', 'ACUUSDT', 'XUSDT',
+                 '1000CATUSDT', '1000CHEEMSUSDT', 'COWUSDT', 'POPCATUSDT'}
+
+    def wait_for_candle_close():
+        """Wait for next 1-minute candle close"""
+        now = datetime.utcnow()
+        seconds_to_wait = 60 - now.second + 2
+        if seconds_to_wait > 60:
+            seconds_to_wait -= 60
+        if seconds_to_wait > 0:
+            print(f"\n[SYNC] Waiting {seconds_to_wait}s for candle close...", flush=True)
+            time.sleep(seconds_to_wait)
+        return datetime.utcnow()
+
+    def _scan_worker(sym, queue):
+        """Worker process for scanning one coin"""
+        try:
+            from ob_scalper_live import OBScalperLive
+            s = OBScalperLive()
+            result = s.get_signal(sym)
+            queue.put(('ok', result))
+        except Exception as ex:
+            queue.put(('error', str(ex)[:50]))
+
     coin_index = 0
     last_status_time = time.time()
-    STATUS_INTERVAL = 60  # Status update every 60 seconds
+    STATUS_INTERVAL = 60
     signals_found = 0
-    runtime_skip = set()  # Coins that timeout get added here automatically
-    used_obs = set()  # Track OBs that have been traded (filled) - format: "SYMBOL_obtop_obbottom"
-    batch_signals = []  # Collect signals during scan cycle, process at end
+    runtime_skip = set()  # Auto-skip coins that timeout
+    used_obs = set()
+    batch_signals = []
 
-    print(f"\n[BATCH SCAN] {len(coins)} coins × {SCAN_DELAY}s = {len(coins) * SCAN_DELAY / 60:.1f} min cycle", flush=True)
-    print(f"[BATCH SCAN] Signals ranked by score at end of each cycle", flush=True)
+    # Filter out known problematic coins
+    scan_coins = [c for c in coins if c not in SCAN_SKIP]
+    print(f"\n[SCAN] {len(scan_coins)} coins ({len(SCAN_SKIP)} skipped)", flush=True)
+    print(f"[SCAN] Delay: {SCAN_DELAY}s, Timeout: {SCAN_TIMEOUT}s per coin", flush=True)
 
     while True:
         try:
             now = datetime.utcnow()
-            symbol = coins[coin_index]
 
-            # Skip coins that timed out previously
+            # === SYNC TO CANDLE CLOSE (start of each cycle) ===
+            if SYNC_TO_CANDLE and coin_index == 0:
+                now = wait_for_candle_close()
+                print(f"[SCAN] Starting cycle at {now.strftime('%H:%M:%S')}", flush=True)
+                batch_signals = []  # Clear for new cycle
+
+            # Get current coin
+            if coin_index >= len(scan_coins):
+                coin_index = 0
+                continue
+
+            symbol = scan_coins[coin_index]
+
+            # Skip coins that timed out before
             if symbol in runtime_skip:
-                coin_index = (coin_index + 1) % len(coins)
+                coin_index += 1
                 continue
 
             # === STATUS UPDATE (every 60s) ===
@@ -637,20 +805,37 @@ def run_scalper_live():
                                 print(f"  [RELEASE] OB freed for {info['symbol']}", flush=True)
                             del pending_orders[order_id]
 
-                    # Check filled
+                    # Check filled - verify order is gone AND position exists
                     open_orders = executor.get_open_orders()
                     open_ids = {o['orderId'] for o in open_orders}
                     for oid in list(pending_orders.keys()):
                         if oid not in open_ids:
                             info = pending_orders.pop(oid)
+                            sym = info['symbol']
+
+                            # IMPORTANT: Verify position actually exists before marking as filled
+                            # Order could have been rejected/cancelled, not filled
+                            pos = executor.get_position(sym)
+                            if pos is None or pos.size == 0:
+                                # No position = order was NOT filled (rejected/cancelled)
+                                print(f"  [CANCELLED] {sym} order gone but no position - likely rejected", flush=True)
+                                # Release OB for reuse
+                                if 'ob_key' in info:
+                                    used_obs.discard(info['ob_key'])
+                                # Clean up trade_pairs if exists
+                                if sym in trade_pairs:
+                                    del trade_pairs[sym]
+                                continue
+
+                            # Position exists = order was filled
                             # Mark this OB as used so we don't trade it again!
                             if 'ob_key' in info:
                                 used_obs.add(info['ob_key'])
-                            # Mark trade as filled for exit detection
-                            sym = info['symbol']
+                            # Mark trade entry as filled for exit detection
                             if sym in trade_pairs:
-                                trade_pairs[sym]['filled'] = True
-                                # Send Telegram notification ONLY when order is filled
+                                trade_pairs[sym]['entry_filled'] = True
+                                trade_pairs[sym]['initial_qty'] = trade_pairs[sym].get('qty', 0)
+                                # Send Telegram notification ONLY when entry order is filled
                                 if not trade_pairs[sym].get('tg_notified', False):
                                     trade_pairs[sym]['tg_notified'] = True
                                     pair = trade_pairs[sym]
@@ -664,7 +849,7 @@ def run_scalper_live():
                                         leverage=pair.get('leverage', 5),
                                         risk_pct=RISK_PER_TRADE_PCT,
                                     )
-                            print(f"  [FILLED] {info['symbol']} {info['direction'].upper()}!", flush=True)
+                            print(f"  [ENTRY FILL] {info['symbol']} {info['direction'].upper()}!", flush=True)
 
                 # Show status
                 positions = executor.get_all_positions()
@@ -676,16 +861,17 @@ def run_scalper_live():
                 for sym in list(trade_pairs.keys()):
                     pair = trade_pairs[sym]
 
-                    # Skip if orders for this symbol are still pending (not filled yet)
-                    if not pair.get('filled', False):
+                    # Skip if entry orders for this symbol are still pending (not filled yet)
+                    if not pair.get('entry_filled', False):
                         # Check if any pending orders exist for this symbol
                         has_pending = any(o['symbol'] == sym for o in pending_orders.values())
                         if has_pending:
-                            continue  # Still waiting for fill, not a real exit
-                        # If no pending orders and no position, mark as filled (order filled and position exists somewhere)
+                            continue  # Still waiting for entry fill
+                        # If no pending orders and position exists, mark entry as filled
                         if sym in position_symbols:
-                            pair['filled'] = True
-                            print(f"  [FILLED] {sym} position detected, tracking for exit", flush=True)
+                            pair['entry_filled'] = True
+                            pair['initial_qty'] = pair.get('qty', 0)
+                            print(f"  [ENTRY FILL] {sym} position detected, tracking for TP/SL", flush=True)
                         continue  # Either way, don't trigger exit yet
 
                     if sym not in position_symbols:
@@ -755,72 +941,58 @@ def run_scalper_live():
                         del trade_pairs[sym]
 
                 print(f"  Positions: {longs}L/{shorts}S | Pending: {len(pending_orders)}", flush=True)
-                print(f"  Cycle: {coin_index}/{len(coins)} | Signals: {signals_found}", flush=True)
+                print(f"  Cycle: {coin_index}/{len(scan_coins)} | Signals: {signals_found}", flush=True)
                 if runtime_skip:
-                    print(f"  Auto-skipped: {', '.join(runtime_skip)}", flush=True)
+                    print(f"  Auto-skipped: {', '.join(list(runtime_skip)[:5])}", flush=True)
 
-            # === SCAN SINGLE COIN (with process-based timeout) ===
-            print(f"  [{coin_index}] {symbol}...", end="", flush=True)
+            # === SCAN SINGLE COIN (with subprocess timeout) ===
+            import multiprocessing as mp
+
+            print(f"  [{coin_index+1}/{len(scan_coins)}] {symbol}...", end="", flush=True)
 
             signal = None
             try:
-                # Use multiprocessing for REAL timeout (can kill stuck processes)
-                import multiprocessing
-                from multiprocessing import Process, Queue
-
-                def scan_worker(sym, queue):
-                    try:
-                        # Re-create scanner in subprocess
-                        from ob_scalper_live import OBScalperLive
-                        worker_scanner = OBScalperLive()
-                        result = worker_scanner.get_signal(sym)
-                        queue.put(('ok', result))
-                    except Exception as ex:
-                        queue.put(('error', str(ex)[:50]))
-
-                result_queue = Queue()
-                proc = Process(target=scan_worker, args=(symbol, result_queue))
+                result_queue = mp.Queue()
+                proc = mp.Process(target=_scan_worker, args=(symbol, result_queue))
                 proc.start()
-                proc.join(timeout=20)  # 20 second hard timeout
+                proc.join(timeout=SCAN_TIMEOUT)
 
                 if proc.is_alive():
-                    # Process hung - kill it!
-                    proc.terminate()
-                    proc.join(timeout=2)
-                    if proc.is_alive():
-                        proc.kill()  # Force kill
+                    proc.kill()
+                    proc.join()
                     print(" TIMEOUT!", flush=True)
-                    # Add to runtime skip list
                     runtime_skip.add(symbol)
                 elif not result_queue.empty():
                     status, data = result_queue.get_nowait()
-                    if status == 'ok':
+                    if status == 'ok' and data is not None:
                         signal = data
-                        print(" OK", flush=True)
+                        print(f" OK (score={signal.score:.1f})", flush=True)
                     else:
-                        print(f" skip", flush=True)
+                        print(" skip", flush=True)
                 else:
                     print(" skip", flush=True)
-
             except Exception as e:
                 print(f" err", flush=True)
 
+            # Add signal to batch if valid
             if signal:
-                # Add to batch (basic filtering only - ranking happens at cycle end)
                 ob_key = f"{signal.symbol}_{signal.ob_top}_{signal.ob_bottom}"
 
                 if ob_key in used_obs:
-                    print(f"  [SKIP] {symbol} - OB already traded", flush=True)
+                    print(f"    [SKIP] OB already traded", flush=True)
                 elif any(o['symbol'] == signal.symbol for o in pending_orders.values()):
-                    print(f"  [SKIP] {symbol} - already pending", flush=True)
+                    print(f"    [SKIP] Already pending", flush=True)
                 else:
-                    # Add signal to batch with its ob_key
                     signal._ob_key = ob_key
                     batch_signals.append(signal)
-                    print(f"  [BATCH+] Score={signal.score:.1f} Dist={signal.distance_to_entry_pct:.2f}%", flush=True)
+                    print(f"    [BATCH+] Added to batch ({len(batch_signals)} total)", flush=True)
+
+            # Move to next coin
+            coin_index += 1
+            time.sleep(SCAN_DELAY)
 
             # === END OF CYCLE: Process batch and place orders ===
-            if coin_index == len(coins) - 1 and batch_signals:
+            if coin_index >= len(scan_coins) and batch_signals:
                 print(f"\n[BATCH] Cycle complete - {len(batch_signals)} signals collected", flush=True)
 
                 # Get current positions
@@ -877,17 +1049,44 @@ def run_scalper_live():
                         equity = balance.get('available', 0)
                         sl_pct = abs(signal.entry_price - signal.sl_price) / signal.entry_price * 100
 
-                        # Calculate qty based on risk
+                        # === DYNAMIC POSITION SIZING ===
+                        # Goal: Always achieve exactly RISK_PER_TRADE_PCT risk (2%)
+                        # Balance between leverage (max 50x) and margin (max 50% of equity)
+                        MAX_LEVERAGE_LIMIT = 50  # Our max leverage limit
+                        MAX_MARGIN_PCT = 0.50    # Max 50% of equity per trade
+
+                        # Get coin's max leverage from Bybit
+                        coin_max_leverage = executor.get_max_leverage(signal.symbol)
+                        max_leverage = min(MAX_LEVERAGE_LIMIT, coin_max_leverage)
+
+                        # Calculate required position for 2% risk
                         risk_usd = equity * (RISK_PER_TRADE_PCT / 100)
-                        qty_usd = risk_usd / (sl_pct / 100) if sl_pct > 0 else 0
+                        sl_pct_decimal = sl_pct / 100
+                        position_usd_needed = risk_usd / sl_pct_decimal  # Notional needed for 2% risk
 
-                        # Cap position size - divide by max positions so all can fit
-                        max_positions = MAX_LONGS + MAX_SHORTS  # e.g. 2+2=4
-                        max_position_usd = (equity * 0.8 / max_positions) * signal.leverage
-                        if qty_usd > max_position_usd:
-                            qty_usd = max_position_usd
-                            print(f"  [CAP] Position capped to ${qty_usd:.0f} (1/{max_positions} of margin)", flush=True)
+                        # Calculate minimum leverage needed to stay within margin limit
+                        # margin = position / leverage <= max_margin_pct * equity
+                        # leverage >= position / (max_margin_pct * equity)
+                        min_leverage_needed = position_usd_needed / (MAX_MARGIN_PCT * equity) if equity > 0 else 999
 
+                        if min_leverage_needed > max_leverage:
+                            # Can't achieve 2% risk within constraints - skip this trade
+                            print(f"  [SKIP] Can't achieve 2% risk: need {min_leverage_needed:.0f}x lev, max {max_leverage}x", flush=True)
+                            if ob_key:
+                                used_obs.discard(ob_key)
+                            continue
+
+                        # Use minimum leverage that achieves target (round up to be safe)
+                        leverage = min(max_leverage, max(5, int(min_leverage_needed) + 1))
+                        signal.leverage = leverage  # Update signal with dynamic leverage
+
+                        # Calculate actual margin used
+                        margin_usd = position_usd_needed / leverage
+                        margin_pct = margin_usd / equity * 100
+
+                        print(f"  [DYNAMIC] SL={sl_pct:.2f}%, Lev={leverage}x, Margin={margin_pct:.1f}%, Risk={RISK_PER_TRADE_PCT}%", flush=True)
+
+                        qty_usd = position_usd_needed
                         qty = qty_usd / signal.entry_price if signal.entry_price > 0 else 0
 
                         # Round to appropriate precision (most coins: 0-3 decimals)
@@ -908,16 +1107,24 @@ def run_scalper_live():
 
                             # === PARTIAL TP: Split into 2 orders (like backtest) ===
                             if signal.use_partial_tp and signal.partial_tp_price:
-                                qty1 = qty * signal.partial_size  # First 50%
-                                qty2 = qty - qty1  # Remaining 50%
+                                # IMPORTANT: Round qty1 first, then qty2 = qty - qty1
+                                # This ensures qty1 + qty2 = qty exactly (no residual position)
+                                qty1_raw = qty * signal.partial_size  # First 50%
 
-                                # Round quantities
+                                # Round qty1 only, derive qty2 from remainder
                                 if signal.entry_price > 100:
-                                    qty1, qty2 = round(qty1, 2), round(qty2, 2)
+                                    qty1 = round(qty1_raw, 2)
+                                    qty2 = round(qty - qty1, 2)  # Remainder gets same precision
                                 elif signal.entry_price > 1:
-                                    qty1, qty2 = round(qty1, 1), round(qty2, 1)
+                                    qty1 = round(qty1_raw, 1)
+                                    qty2 = round(qty - qty1, 1)
                                 else:
-                                    qty1, qty2 = round(qty1, 0), round(qty2, 0)
+                                    qty1 = round(qty1_raw, 0)
+                                    qty2 = round(qty - qty1, 0)
+
+                                # Safety: ensure we don't exceed original qty
+                                if qty1 + qty2 > qty:
+                                    qty2 = qty - qty1
 
                                 print(f"  [PARTIAL] Order1: {qty1} @ TP1={signal.partial_tp_price:.4f}", flush=True)
                                 print(f"  [PARTIAL] Order2: {qty2} @ TP2={signal.tp_price:.4f}", flush=True)
@@ -1013,22 +1220,24 @@ def run_scalper_live():
                                             # See fill detection section for tg.send_trade_opened()
 
                                             trade_pairs[signal.symbol] = {
-                                                'order1': oid1,  # TP1 order
-                                                'order2': oid2,  # TP2 order
+                                                'order1': oid1,  # ENTRY order 1 (50% with TP1)
+                                                'order2': oid2,  # ENTRY order 2 (50% with TP2)
                                                 'entry': signal.entry_price,
                                                 'direction': signal.direction,
+                                                'entry_filled': False,  # Set True when entry fills
                                                 'tp1_filled': False,
                                                 'tp1_price': signal.partial_tp_price,
                                                 'tp2_price': signal.tp_price,
                                                 'sl_price': signal.sl_price,
                                                 'leverage': signal.leverage,  # For TG notification
                                                 'qty': qty,
+                                                'initial_qty': qty,  # Track for TP1 detection
                                                 'margin_used': qty * signal.entry_price / signal.leverage,
                                                 'entry_time': now,
                                                 'db_trade_id': db_trade_id,  # For exit logging
                                                 'equity_at_entry': equity,
                                             }
-                                            print(f"  [TRACK] Registered for SL→BE monitoring", flush=True)
+                                            print(f"  [TRACK] Registered for TP/SL monitoring", flush=True)
                                     else:
                                         print(f"  [ERR2] {resp2['retMsg']}", flush=True)
 
@@ -1066,9 +1275,11 @@ def run_scalper_live():
                                 except Exception as e:
                                     print(f"  [ERR] {str(e)[:50]}", flush=True)
 
-            # Next coin
-            coin_index = (coin_index + 1) % len(coins)
-            time.sleep(SCAN_DELAY)
+            # Reset coin_index at end of cycle (if we processed signals or if no signals)
+            if coin_index >= len(scan_coins):
+                coin_index = 0
+                if not batch_signals:
+                    print(f"\n[CYCLE] Complete - no signals this cycle", flush=True)
 
         except KeyboardInterrupt:
             print("\nStopping...", flush=True)

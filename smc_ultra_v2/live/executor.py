@@ -494,3 +494,19 @@ class BybitExecutor:
         except Exception as e:
             print(f"Error cancelling orders: {e}")
             return False
+
+    def get_max_leverage(self, symbol: str) -> int:
+        """Get maximum leverage allowed for a symbol"""
+        try:
+            response = self.client.get_instruments_info(
+                category="linear",
+                symbol=symbol
+            )
+            if response['retCode'] == 0 and response['result']['list']:
+                info = response['result']['list'][0]
+                max_lev = float(info.get('leverageFilter', {}).get('maxLeverage', 50))
+                return int(max_lev)
+            return 50  # Default fallback
+        except Exception as e:
+            print(f"  [WARN] Max leverage query failed: {e}")
+            return 50  # Default fallback

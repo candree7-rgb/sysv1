@@ -33,6 +33,9 @@ OB_MAX_AGE = int(os.getenv('OB_MAX_AGE', '100'))  # Same as backtest (was 50)
 RR_TARGET = float(os.getenv('RR_TARGET', '2.0'))  # Same as backtest (was 1.5)
 SL_BUFFER_PCT = float(os.getenv('SL_BUFFER_PCT', '0.05'))
 
+# Order Expiry - SAME AS BACKTEST (skip OBs detected too long ago)
+MAX_ORDER_AGE_MIN = int(os.getenv('MAX_ORDER_AGE_MIN', '30'))  # 30 min like backtest
+
 # Volume Filter - SAME AS BACKTEST (confirms institutional interest)
 MIN_VOLUME_RATIO = float(os.getenv('MIN_VOLUME_RATIO', '1.2'))  # 1.2x average volume
 USE_VOLUME_FILTER = os.getenv('USE_VOLUME_FILTER', 'true').lower() == 'true'  # ON by default
@@ -48,7 +51,8 @@ PARTIAL_TP_LEVEL = float(os.getenv('PARTIAL_TP_LEVEL', '0.5'))
 PARTIAL_SIZE = float(os.getenv('PARTIAL_SIZE', '0.5'))
 
 # Risk & Leverage
-MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '20'))
+MAX_LEVERAGE = int(os.getenv('MAX_LEVERAGE', '50'))  # Max 50x leverage
+MAX_MARGIN_PCT = float(os.getenv('MAX_MARGIN_PCT', '0.50'))  # Max 50% margin per trade
 RISK_PER_TRADE_PCT = float(os.getenv('RISK_PER_TRADE_PCT', '2.0'))  # Target risk % per trade
 
 
@@ -221,19 +225,35 @@ class OBScalperLive:
         self._preloaded = True
 
     def _get_cached(self, symbol: str, interval: str, days: int):
-        """Get data with caching to reduce API calls"""
+        """Get data with caching - tries WebSocket first, then API"""
         import time
         now = time.time()
 
         cache_key = f"{symbol}_{interval}"
+
+        # === TRY WEBSOCKET CACHE FIRST (for 5m and 1h) ===
+        if interval in ['5', '60']:
+            try:
+                from live.candle_streamer import get_candle_streamer
+                streamer = get_candle_streamer()
+                if streamer and streamer.has_data(symbol, interval, min_candles=50):
+                    df = streamer.get_candles(symbol, interval, limit=200)
+                    if df is not None and len(df) >= 50:
+                        # Cache it for consistency
+                        self._data_cache[cache_key] = (df, now)
+                        return df
+            except:
+                pass  # Fall through to API
+
+        # === CHECK MEMORY CACHE ===
         if cache_key in self._data_cache:
             df, cached_at = self._data_cache[cache_key]
             cache_duration = self._cache_duration.get(interval, 300)
             if now - cached_at < cache_duration:
                 return df  # Return cached
 
+        # === FALL BACK TO API ===
         # For LIVE trading: ensure file cache also has fresh candles
-        # Max candle age = interval + small buffer (for 100% backtest parity)
         max_candle_age = {
             '1': 3,        # 1m: max 3 min old
             '5': 10,       # 5m: max 10 min old (1 candle behind max)
@@ -433,10 +453,16 @@ class OBScalperLive:
             ob_low_vol = 0
 
             for ob in obs:
-                # Not mitigated
+                # Not mitigated (SAME AS BACKTEST - check timestamp)
                 if ob.is_mitigated:
-                    ob_mitigated += 1
-                    continue
+                    # Only skip if mitigation already happened (not in future)
+                    if hasattr(ob, 'mitigation_timestamp') and ob.mitigation_timestamp:
+                        if ob.mitigation_timestamp <= ts:
+                            ob_mitigated += 1
+                            continue  # Already mitigated before this candle
+                    else:
+                        ob_mitigated += 1
+                        continue  # No timestamp, assume mitigated
 
                 # Strength filter
                 min_strength = OB_MIN_STRENGTH_SHORT if direction == 'short' else OB_MIN_STRENGTH
@@ -455,6 +481,14 @@ class OBScalperLive:
                 if ob_age > OB_MAX_AGE or ob_age < 0:
                     ob_old += 1
                     continue
+
+                # Order expiry simulation - SAME AS BACKTEST
+                # Skip OBs that were detected too long ago (order would have expired)
+                ob_detection_time = ob.detection_timestamp if hasattr(ob, 'detection_timestamp') and ob.detection_timestamp else ob.timestamp
+                time_since_detection_min = (ts - ob_detection_time).total_seconds() / 60
+                if time_since_detection_min > MAX_ORDER_AGE_MIN:
+                    ob_old += 1  # Count as "old" for logging
+                    continue  # Order would have expired in backtest!
 
                 # Direction match
                 if direction == 'long' and not ob.is_bullish:
@@ -509,9 +543,24 @@ class OBScalperLive:
                 sl_distance = sl - entry
                 tp = entry - (sl_distance * RR_TARGET)
 
-            # Calculate leverage (same as backtest)
+            # === DYNAMIC LEVERAGE CALCULATION ===
+            # Calculate minimum leverage needed to achieve 2% risk within margin limits
             sl_pct = abs(entry - sl) / entry * 100
-            leverage = min(MAX_LEVERAGE, max(5, int(RISK_PER_TRADE_PCT / sl_pct)))
+            sl_pct_decimal = sl_pct / 100
+
+            # min_leverage = position_needed / (max_margin * equity)
+            # But here we don't have equity, so we use a formula:
+            # min_leverage = risk_pct / (sl_pct * max_margin_pct)
+            min_leverage_needed = (RISK_PER_TRADE_PCT / 100) / (sl_pct_decimal * MAX_MARGIN_PCT)
+
+            if min_leverage_needed > MAX_LEVERAGE:
+                # Can't achieve 2% risk within constraints
+                if debug:
+                    print(f"      {symbol}: SKIP - need {min_leverage_needed:.0f}x lev, max {MAX_LEVERAGE}x")
+                return None
+
+            # Use minimum leverage that achieves target (round up)
+            leverage = min(MAX_LEVERAGE, max(5, int(min_leverage_needed) + 1))
 
             # Partial TP price
             partial_tp_price = None

@@ -14,12 +14,12 @@ i_rr_ratio      = input.float(2.0, "Risk:Reward Ratio", minval=1.0, maxval=5.0, 
 i_sl_buffer     = input.float(0.5, "SL Buffer %", minval=0.0, maxval=2.0, step=0.1, group=grp_strat, tooltip="Extra buffer below/above OB for SL")
 i_max_ob_age    = input.int(30, "Max OB Age (bars)", minval=5, maxval=100, group=grp_strat)
 
-// Partial TP Settings
-grp_partial = "Partial Take Profit"
-i_use_partial   = input.bool(true, "Use Partial TP", group=grp_partial)
-i_partial_pct   = input.float(50, "Partial TP Size %", minval=10, maxval=90, step=10, group=grp_partial)
-i_partial_level = input.float(50, "Partial TP at % of Full TP", minval=25, maxval=75, step=5, group=grp_partial)
-i_move_sl_be    = input.bool(true, "Move SL to BE after Partial", group=grp_partial)
+// Take Profit Settings
+grp_tp = "Take Profit Mode"
+i_tp_mode       = input.string("TP1+TP2 (50/50)", "TP Mode", options=["TP1 Only (100%)", "TP1+TP2 (50/50)"], group=grp_tp, tooltip="TP1 Only = single target at TP1 with 100% size\nTP1+TP2 = 50% at TP1, 50% at TP2")
+i_tp1_rr        = input.float(1.0, "TP1 Risk:Reward", minval=0.5, maxval=3.0, step=0.25, group=grp_tp, tooltip="TP1 target as multiple of risk")
+i_tp2_rr        = input.float(2.0, "TP2 Risk:Reward", minval=1.0, maxval=5.0, step=0.5, group=grp_tp, tooltip="TP2 target as multiple of risk (only for 50/50 mode)")
+i_move_sl_be    = input.bool(true, "Move SL to BE after TP1", group=grp_tp, tooltip="After TP1 hit, move SL to breakeven (only for 50/50 mode)")
 
 //=============================================================================
 // INPUTS - Order Block Settings
@@ -31,9 +31,10 @@ i_ob_strength   = input.float(0.8, "Min OB Strength", minval=0.5, maxval=1.0, st
 i_ob_mitigation = input.string("Close", "Mitigation Method", options=["Touch", "Wick", "Close"], group=grp_ob)
 i_internal_len  = input.int(5, "Internal Structure Length", minval=2, maxval=20, group=grp_ob)
 
-// OB Colors
-i_ob_bull_css   = input.color(color.new(#089981, 80), "Bullish OB Color", group=grp_ob)
-i_ob_bear_css   = input.color(color.new(#f23645, 80), "Bearish OB Color", group=grp_ob)
+// OB Colors - Default: Bullish=Green, Bearish=Red
+i_ob_bull_css   = input.color(color.new(#00C853, 85), "Bullish OB Color", group=grp_ob)  // Bright Green
+i_ob_bear_css   = input.color(color.new(#FF5252, 85), "Bearish OB Color", group=grp_ob)  // Bright Red
+i_ob_show_labels = input.bool(true, "Show OB Labels", group=grp_ob)
 
 //=============================================================================
 // INPUTS - MTF (Multi-Timeframe) Filter
@@ -289,7 +290,7 @@ if array.size(bull_ob_top) > 0 and strategy.position_size == 0
                 bull_entry := ob_top
                 bull_sl := ob_btm * (1 - i_sl_buffer/100)
                 sl_dist = bull_entry - bull_sl
-                bull_tp := bull_entry + (sl_dist * i_rr_ratio)
+                bull_tp := bull_entry + (sl_dist * i_tp2_rr)  // TP2 at full RR
                 break
 
 // Check for bearish OB entry (price touches bearish OB from below)
@@ -326,7 +327,7 @@ if array.size(bear_ob_top) > 0 and strategy.position_size == 0
                 bear_entry := ob_btm
                 bear_sl := ob_top * (1 + i_sl_buffer/100)
                 sl_dist = bear_sl - bear_entry
-                bear_tp := bear_entry - (sl_dist * i_rr_ratio)
+                bear_tp := bear_entry - (sl_dist * i_tp2_rr)  // TP2 at full RR
                 break
 
 //=============================================================================
@@ -381,62 +382,128 @@ if short_condition
         array.remove(bear_ob_bar, active_bear_ob_idx)
         array.remove(bear_ob_strength, active_bear_ob_idx)
 
-// Exit logic with partial TP
+// Exit logic based on TP mode
+use_split_tp = i_tp_mode == "TP1+TP2 (50/50)"
+
 if strategy.position_size > 0  // Long position
     current_sl = bull_sl
+    sl_dist = entry_price - bull_sl
+    tp1_price = entry_price + (sl_dist * i_tp1_rr)
+    tp2_price = entry_price + (sl_dist * i_tp2_rr)
 
-    // Partial TP
-    if i_use_partial and not partial_taken
-        partial_tp_price = entry_price + (bull_tp - entry_price) * (i_partial_level / 100)
-        if high >= partial_tp_price
-            strategy.close("Long", qty_percent=i_partial_pct, comment="Partial TP")
-            partial_taken := true
-            if i_move_sl_be
-                current_sl := entry_price * 1.001  // Move SL to BE + 0.1%
-
-    strategy.exit("Long Exit", "Long", stop=current_sl, limit=bull_tp)
+    if use_split_tp
+        // 50/50 Mode: TP1 then TP2
+        if not partial_taken
+            if high >= tp1_price
+                strategy.close("Long", qty_percent=50, comment="TP1 Hit")
+                partial_taken := true
+                if i_move_sl_be
+                    current_sl := entry_price * 1.001  // Move SL to BE + 0.1%
+        strategy.exit("Long Exit", "Long", stop=current_sl, limit=tp2_price)
+    else
+        // TP1 Only Mode: 100% at TP1
+        strategy.exit("Long Exit", "Long", stop=current_sl, limit=tp1_price)
 
 if strategy.position_size < 0  // Short position
     current_sl = bear_sl
+    sl_dist = bear_sl - entry_price
+    tp1_price = entry_price - (sl_dist * i_tp1_rr)
+    tp2_price = entry_price - (sl_dist * i_tp2_rr)
 
-    // Partial TP
-    if i_use_partial and not partial_taken
-        partial_tp_price = entry_price - (entry_price - bear_tp) * (i_partial_level / 100)
-        if low <= partial_tp_price
-            strategy.close("Short", qty_percent=i_partial_pct, comment="Partial TP")
-            partial_taken := true
-            if i_move_sl_be
-                current_sl := entry_price * 0.999  // Move SL to BE - 0.1%
-
-    strategy.exit("Short Exit", "Short", stop=current_sl, limit=bear_tp)
+    if use_split_tp
+        // 50/50 Mode: TP1 then TP2
+        if not partial_taken
+            if low <= tp1_price
+                strategy.close("Short", qty_percent=50, comment="TP1 Hit")
+                partial_taken := true
+                if i_move_sl_be
+                    current_sl := entry_price * 0.999  // Move SL to BE - 0.1%
+        strategy.exit("Short Exit", "Short", stop=current_sl, limit=tp2_price)
+    else
+        // TP1 Only Mode: 100% at TP1
+        strategy.exit("Short Exit", "Short", stop=current_sl, limit=tp1_price)
 
 //=============================================================================
-// VISUALS - Order Block Boxes
+// VISUALS - Order Block Boxes (Fixed/Persistent)
 //=============================================================================
 
-// Draw bullish OBs
-if i_ob_show and barstate.islast
-    for i = 0 to math.min(array.size(bull_ob_top) - 1, i_ob_num - 1)
-        ob_top = array.get(bull_ob_top, i)
-        ob_btm = array.get(bull_ob_btm, i)
-        ob_bar = array.get(bull_ob_bar, i)
+// Store box and label references for persistence
+var array<box> bull_boxes = array.new_box(0)
+var array<box> bear_boxes = array.new_box(0)
+var array<label> bull_labels = array.new_label(0)
+var array<label> bear_labels = array.new_label(0)
 
-        box.new(ob_bar, ob_top, bar_index + 10, ob_btm,
-                border_color=color.new(#089981, 50),
-                bgcolor=i_ob_bull_css,
-                xloc=xloc.bar_index)
+// Clean up old boxes/labels and redraw on each bar
+if i_ob_show
+    // Delete old bullish boxes and labels (only if arrays have elements)
+    if array.size(bull_boxes) > 0
+        for i = 0 to array.size(bull_boxes) - 1
+            box.delete(array.get(bull_boxes, i))
+        array.clear(bull_boxes)
+    if array.size(bull_labels) > 0
+        for i = 0 to array.size(bull_labels) - 1
+            label.delete(array.get(bull_labels, i))
+        array.clear(bull_labels)
 
-// Draw bearish OBs
-if i_ob_show and barstate.islast
-    for i = 0 to math.min(array.size(bear_ob_top) - 1, i_ob_num - 1)
-        ob_top = array.get(bear_ob_top, i)
-        ob_btm = array.get(bear_ob_btm, i)
-        ob_bar = array.get(bear_ob_bar, i)
+    // Delete old bearish boxes and labels (only if arrays have elements)
+    if array.size(bear_boxes) > 0
+        for i = 0 to array.size(bear_boxes) - 1
+            box.delete(array.get(bear_boxes, i))
+        array.clear(bear_boxes)
+    if array.size(bear_labels) > 0
+        for i = 0 to array.size(bear_labels) - 1
+            label.delete(array.get(bear_labels, i))
+        array.clear(bear_labels)
 
-        box.new(ob_bar, ob_top, bar_index + 10, ob_btm,
-                border_color=color.new(#f23645, 50),
-                bgcolor=i_ob_bear_css,
-                xloc=xloc.bar_index)
+    // Draw bullish OBs - FIXED GREEN boxes (only if OBs exist)
+    if array.size(bull_ob_top) > 0
+        for i = 0 to math.min(array.size(bull_ob_top) - 1, i_ob_num - 1)
+            ob_top = array.get(bull_ob_top, i)
+            ob_btm = array.get(bull_ob_btm, i)
+            ob_bar = array.get(bull_ob_bar, i)
+            ob_age = bar_index - ob_bar
+
+            // Create persistent green box for bullish OB
+            new_box = box.new(ob_bar, ob_top, bar_index + 50, ob_btm,
+                    border_color=color.new(#00C853, 30),         // Strong green border
+                    bgcolor=i_ob_bull_css,                       // User configurable fill
+                    border_width=2,
+                    xloc=xloc.bar_index)
+            array.push(bull_boxes, new_box)
+
+            // Add label for bullish OB with age info (optional)
+            if i_ob_show_labels
+                new_label = label.new(ob_bar, ob_top, "BULL OB (" + str.tostring(ob_age) + ")",
+                          color=color.new(#00C853, 50),
+                          textcolor=color.white,
+                          style=label.style_label_down,
+                          size=size.tiny)
+                array.push(bull_labels, new_label)
+
+    // Draw bearish OBs - FIXED RED boxes (only if OBs exist)
+    if array.size(bear_ob_top) > 0
+        for i = 0 to math.min(array.size(bear_ob_top) - 1, i_ob_num - 1)
+            ob_top = array.get(bear_ob_top, i)
+            ob_btm = array.get(bear_ob_btm, i)
+            ob_bar = array.get(bear_ob_bar, i)
+            ob_age = bar_index - ob_bar
+
+            // Create persistent red box for bearish OB
+            new_box = box.new(ob_bar, ob_top, bar_index + 50, ob_btm,
+                    border_color=color.new(#FF5252, 30),         // Strong red border
+                    bgcolor=i_ob_bear_css,                       // User configurable fill
+                    border_width=2,
+                    xloc=xloc.bar_index)
+            array.push(bear_boxes, new_box)
+
+            // Add label for bearish OB with age info (optional)
+            if i_ob_show_labels
+                new_label = label.new(ob_bar, ob_btm, "BEAR OB (" + str.tostring(ob_age) + ")",
+                          color=color.new(#FF5252, 50),
+                          textcolor=color.white,
+                          style=label.style_label_up,
+                          size=size.tiny)
+                array.push(bear_labels, new_label)
 
 //=============================================================================
 // PLOTS
@@ -454,10 +521,33 @@ plot(ema_fast, "EMA Fast", color=color.new(#2962FF, 50), linewidth=1)
 plot(ema_slow, "EMA Slow", color=color.new(#FF6D00, 50), linewidth=1)
 
 //=============================================================================
-// ALERTS
+// ALERTS - Webhook with Full Trade Levels
 //=============================================================================
 
+// Standard alerts
 alertcondition(long_condition, title="Long Entry", message="SMC OB Strategy: Long Entry Signal")
 alertcondition(short_condition, title="Short Entry", message="SMC OB Strategy: Short Entry Signal")
 alertcondition(bull_break, title="Bullish Structure Break", message="Bullish structure break detected")
 alertcondition(bear_break, title="Bearish Structure Break", message="Bearish structure break detected")
+
+//=============================================================================
+// WEBHOOK ALERTS - Use these for Railway automation
+//=============================================================================
+// NOTE: In TradingView, create an alert with "Any alert() function call"
+// and set webhook URL to your Railway endpoint
+//
+// tp_mode: "split" = 50% TP1 + 50% TP2 | "single" = 100% TP1
+
+if long_condition
+    long_sl_dist = bull_entry - bull_sl
+    long_tp1 = bull_entry + (long_sl_dist * i_tp1_rr)
+    long_tp2 = bull_entry + (long_sl_dist * i_tp2_rr)
+    tp_mode_str = use_split_tp ? "split" : "single"
+    alert('{"action":"entry","symbol":"' + syminfo.ticker + '","direction":"long","entry":' + str.tostring(bull_entry, "#.########") + ',"sl":' + str.tostring(bull_sl, "#.########") + ',"tp1":' + str.tostring(long_tp1, "#.########") + ',"tp2":' + str.tostring(long_tp2, "#.########") + ',"tp_mode":"' + tp_mode_str + '","risk_pct":' + str.tostring(i_risk_pct) + ',"timeframe":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
+
+if short_condition
+    short_sl_dist = bear_sl - bear_entry
+    short_tp1 = bear_entry - (short_sl_dist * i_tp1_rr)
+    short_tp2 = bear_entry - (short_sl_dist * i_tp2_rr)
+    tp_mode_str = use_split_tp ? "split" : "single"
+    alert('{"action":"entry","symbol":"' + syminfo.ticker + '","direction":"short","entry":' + str.tostring(bear_entry, "#.########") + ',"sl":' + str.tostring(bear_sl, "#.########") + ',"tp1":' + str.tostring(short_tp1, "#.########") + ',"tp2":' + str.tostring(short_tp2, "#.########") + ',"tp_mode":"' + tp_mode_str + '","risk_pct":' + str.tostring(i_risk_pct) + ',"timeframe":"' + timeframe.period + '"}', alert.freq_once_per_bar_close)
